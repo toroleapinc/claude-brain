@@ -7,12 +7,14 @@ source "${SCRIPT_DIR}/common.sh"
 MEMORY_ONLY=false
 OUTPUT=""
 QUIET=false
+SKIP_SECRET_SCAN=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --memory-only) MEMORY_ONLY=true; shift ;;
     --output) OUTPUT="$2"; shift 2 ;;
     --quiet) QUIET=true; BRAIN_QUIET=true; shift ;;
+    --skip-secret-scan) SKIP_SECRET_SCAN=true; shift ;;
     *) shift ;;
   esac
 done
@@ -24,18 +26,28 @@ file_entry() {
     echo "null"
     return
   fi
-  local content hash
-  content=$(cat "$filepath")
+
+  # Size guard
+  if ! check_file_size "$filepath"; then
+    log_warn "Skipping oversized file: $filepath"
+    echo "null"
+    return
+  fi
+
+  local hash
   hash=$(file_hash "$filepath")
 
   if $_has_jq; then
-    jq -n --arg content "$content" --arg hash "sha256:${hash}" \
-      '{"content": $content, "hash": $hash}'
+    jq -Rs --arg hash "sha256:${hash}" \
+      '{"content": ., "hash": $hash}' < "$filepath"
   elif $_has_python3; then
+    # Read file content via stdin to avoid injection
     python3 -c "
 import json, sys
-print(json.dumps({'content': '''$(cat "$filepath")''', 'hash': 'sha256:${hash}'}))
-"
+content = sys.stdin.read()
+hash_val = sys.argv[1]
+print(json.dumps({'content': content, 'hash': hash_val}))
+" "sha256:${hash}" < "$filepath"
   fi
 }
 
@@ -51,30 +63,38 @@ scan_dir_entries() {
 
   if $_has_jq; then
     result=$(find "$dir" -type f -name "*.md" 2>/dev/null | sort | while read -r f; do
+      # Size guard per file
+      if ! check_file_size "$f" 2>/dev/null; then
+        continue
+      fi
       local relpath
       relpath=$(realpath --relative-to="$dir" "$f" 2>/dev/null || echo "$(basename "$f")")
-      local content hash
-      content=$(cat "$f")
+      local hash
       hash=$(file_hash "$f")
-      jq -n --arg key "$relpath" --arg content "$content" --arg hash "sha256:${hash}" \
-        '{($key): {"content": $content, "hash": $hash}}'
+      # Use jq -Rs to safely read file content (handles all special chars)
+      jq -Rs --arg key "$relpath" --arg hash "sha256:${hash}" \
+        '{($key): {"content": ., "hash": $hash}}' < "$f"
     done | jq -s 'add // {}')
   elif $_has_python3; then
+    # Python handles its own file reading safely
     result=$(python3 -c "
-import os, json, hashlib
-d = '${dir}'
+import os, json, hashlib, sys
+d = sys.argv[1]
+max_size = int(sys.argv[2])
 result = {}
 for root, dirs, files in os.walk(d):
     for f in sorted(files):
         if f.endswith('.md'):
             path = os.path.join(root, f)
+            if os.path.getsize(path) > max_size:
+                continue
             relpath = os.path.relpath(path, d)
             with open(path) as fh:
                 content = fh.read()
             h = hashlib.sha256(content.encode()).hexdigest()
             result[relpath] = {'content': content, 'hash': f'sha256:{h}'}
 print(json.dumps(result))
-")
+" "$dir" "$MAX_SINGLE_FILE_BYTES")
   fi
   echo "$result"
 }
@@ -133,19 +153,24 @@ build_snapshot() {
       done | jq -s 'add // {}')
     elif $_has_python3; then
       auto_memory=$(python3 -c "
-import os, json, hashlib
-projects_dir = '${CLAUDE_DIR}/projects'
+import os, json, hashlib, sys
+projects_dir = sys.argv[1]
+max_size = int(sys.argv[2])
 result = {}
 if os.path.isdir(projects_dir):
     for encoded in sorted(os.listdir(projects_dir)):
         mem_dir = os.path.join(projects_dir, encoded, 'memory')
         if os.path.isdir(mem_dir) and os.listdir(mem_dir):
-            name = encoded.lstrip('-').replace('-', '/')
-            name = os.path.basename(name) if '/' in name else name
+            # Decode: leading hyphen -> slash, double hyphens -> hyphen, single hyphens -> slash
+            decoded = encoded
+            if decoded.startswith('-'):
+                decoded = '/' + decoded[1:]
+            decoded = decoded.replace('--', '\x00').replace('-', '/').replace('\x00', '-')
+            name = os.path.basename(decoded)
             entries = {}
             for f in sorted(os.listdir(mem_dir)):
                 fp = os.path.join(mem_dir, f)
-                if os.path.isfile(fp):
+                if os.path.isfile(fp) and os.path.getsize(fp) <= max_size:
                     with open(fp) as fh:
                         content = fh.read()
                     h = hashlib.sha256(content.encode()).hexdigest()
@@ -153,7 +178,7 @@ if os.path.isdir(projects_dir):
             if entries:
                 result[name] = entries
 print(json.dumps(result))
-")
+" "${CLAUDE_DIR}/projects" "$MAX_SINGLE_FILE_BYTES")
     fi
   fi
 
@@ -175,19 +200,20 @@ print(json.dumps(result))
     fi
   fi
 
-  # Environmental: settings (strip env vars)
+  # Environmental: settings (strip env vars AND mcpServers — MCP exported separately)
   local settings="null"
   if [ -f "${CLAUDE_DIR}/settings.json" ]; then
     if $_has_jq; then
-      settings=$(jq 'del(.env)' "${CLAUDE_DIR}/settings.json")
+      settings=$(jq 'del(.env) | del(.mcpServers)' "${CLAUDE_DIR}/settings.json")
     elif $_has_python3; then
       settings=$(python3 -c "
-import json
-with open('${CLAUDE_DIR}/settings.json') as f:
+import json, sys
+with open(sys.argv[1]) as f:
     data = json.load(f)
 data.pop('env', None)
+data.pop('mcpServers', None)
 print(json.dumps(data))
-")
+" "${CLAUDE_DIR}/settings.json")
     fi
   fi
 
@@ -205,11 +231,33 @@ print(json.dumps(data))
   fi
 
   # Environmental: MCP servers (from settings.json mcpServers field)
+  # SECURITY: Strip env fields from each server config (may contain API keys/tokens)
   local mcp_servers="{}"
   if [ -f "${CLAUDE_DIR}/settings.json" ] && $_has_jq; then
-    mcp_servers=$(jq '.mcpServers // {}' "${CLAUDE_DIR}/settings.json" 2>/dev/null || echo "{}")
+    mcp_servers=$(jq '
+      .mcpServers // {} |
+      to_entries |
+      map(.value = (.value | del(.env))) |
+      from_entries
+    ' "${CLAUDE_DIR}/settings.json" 2>/dev/null || echo "{}")
     # Rewrite absolute home paths to ${HOME}
     mcp_servers=$(echo "$mcp_servers" | sed "s|${HOME}|\${HOME}|g")
+  elif [ -f "${CLAUDE_DIR}/settings.json" ] && $_has_python3; then
+    mcp_servers=$(python3 -c "
+import json, sys, os
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+servers = data.get('mcpServers', {})
+# Strip env from each server config
+for name in servers:
+    if isinstance(servers[name], dict):
+        servers[name].pop('env', None)
+# Rewrite home paths
+home = os.path.expanduser('~')
+result = json.dumps(servers)
+result = result.replace(home, '\${HOME}')
+print(result)
+" "${CLAUDE_DIR}/settings.json")
   fi
 
   # Assemble full snapshot
@@ -256,38 +304,89 @@ print(json.dumps(data))
         }
       }'
   elif $_has_python3; then
+    # Assemble via Python: write parts to a temp file to avoid shell expansion issues
+    local parts_file
+    parts_file=$(brain_mktemp)
+
+    # Write each JSON component to the parts file safely (no shell expansion)
     python3 -c "
-import json
+import json, sys
+# Read component name-value pairs from argv (pairs of key, json_string)
+parts = {}
+args = sys.argv[1:]
+i = 0
+while i < len(args) - 1:
+    key = args[i]
+    val = args[i+1]
+    try:
+        parts[key] = json.loads(val) if val and val != 'null' else None
+    except json.JSONDecodeError:
+        parts[key] = None
+    i += 2
+with open(args[-1] if len(args) % 2 == 1 else '/dev/stdout', 'w') as f:
+    json.dump(parts, f)
+" \
+      "claude_md" "$claude_md" \
+      "rules" "$rules" \
+      "skills" "$skills" \
+      "agents" "$agents" \
+      "output_styles" "$output_styles" \
+      "auto_memory" "$auto_memory" \
+      "agent_memory" "$agent_memory" \
+      "settings" "${settings:-null}" \
+      "keybindings" "${keybindings:-null}" \
+      "mcp_servers" "$mcp_servers" \
+      "$parts_file"
+
+    # Now assemble the snapshot from the parts file
+    python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    parts = json.load(f)
 snapshot = {
     'schema_version': '1.0.0',
-    'exported_at': '${timestamp}',
-    'machine': {'id': '${machine_id}', 'name': '${machine_name}', 'os': '${os_type}'},
+    'exported_at': sys.argv[2],
+    'machine': {'id': sys.argv[3], 'name': sys.argv[4], 'os': sys.argv[5]},
     'declarative': {
-        'claude_md': json.loads('${claude_md:-null}'),
-        'rules': json.loads('''${rules}''')
+        'claude_md': parts.get('claude_md'),
+        'rules': parts.get('rules', {})
     },
     'procedural': {
-        'skills': json.loads('''${skills}'''),
-        'agents': json.loads('''${agents}'''),
-        'output_styles': json.loads('''${output_styles}''')
+        'skills': parts.get('skills', {}),
+        'agents': parts.get('agents', {}),
+        'output_styles': parts.get('output_styles', {})
     },
     'experiential': {
-        'auto_memory': json.loads('''${auto_memory}'''),
-        'agent_memory': json.loads('''${agent_memory}''')
+        'auto_memory': parts.get('auto_memory', {}),
+        'agent_memory': parts.get('agent_memory', {})
     },
     'environmental': {
-        'settings': {'content': json.loads('${settings:-null}'), 'hash': 'sha256:${settings_hash}'},
-        'keybindings': {'content': json.loads('${keybindings:-null}'), 'hash': 'sha256:${keybindings_hash}'},
-        'mcp_servers': json.loads('''${mcp_servers}''')
+        'settings': {'content': parts.get('settings'), 'hash': 'sha256:' + sys.argv[6]},
+        'keybindings': {'content': parts.get('keybindings'), 'hash': 'sha256:' + sys.argv[7]},
+        'mcp_servers': parts.get('mcp_servers', {})
     }
 }
 print(json.dumps(snapshot, indent=2))
-"
+" "$parts_file" "$timestamp" "$machine_id" "$machine_name" "$os_type" "$settings_hash" "$keybindings_hash"
   fi
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 snapshot=$(build_snapshot)
+
+# Size guard on full snapshot
+snapshot_size=$(echo "$snapshot" | wc -c | tr -d ' ')
+if [ "$snapshot_size" -gt "$MAX_SNAPSHOT_SIZE_BYTES" ]; then
+  log_warn "Brain snapshot is very large (${snapshot_size} bytes). Consider cleaning up memory files."
+fi
+
+# Secret scanning
+if ! $SKIP_SECRET_SCAN; then
+  if ! echo "$snapshot" | scan_for_secrets 2>/dev/null; then
+    log_warn "Potential secrets found in brain data. Export continues, but review the warnings above."
+    log_warn "Pass --skip-secret-scan to suppress this check."
+  fi
+fi
 
 # Compute top-level hash for quick change detection
 snapshot_hash=$(echo "$snapshot" | compute_hash)
@@ -298,6 +397,7 @@ fi
 
 if [ -n "$OUTPUT" ]; then
   echo "$snapshot" > "$OUTPUT"
+  chmod 600 "$OUTPUT"
   log_info "Brain snapshot exported to ${OUTPUT}"
 else
   echo "$snapshot"

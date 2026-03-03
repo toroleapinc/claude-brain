@@ -2,6 +2,38 @@
 
 Sync and evolve your Claude Code brain across machines.
 
+## Security Notice
+
+**Read this before using claude-brain.** This plugin syncs your Claude Code configuration and accumulated knowledge via a Git remote. Understand what data leaves your machine:
+
+### What IS exported to the Git remote
+
+- **CLAUDE.md, rules, skills, agents** — your instructions and workflows
+- **Auto memory and agent memory** — patterns Claude learned from your sessions
+- **Settings** — hooks, permissions, preferences (NOT env vars)
+- **MCP server configurations** — command and args only (env vars containing API keys are **stripped**)
+- **Keybindings** — your keyboard shortcuts
+- **Machine hostname and project directory names** — used for merge tracking
+
+### What is NEVER exported
+
+- OAuth tokens and API keys
+- `~/.claude.json` (internal state, credentials)
+- Environment variables from settings
+- MCP server `env` fields (may contain API keys/tokens)
+- `.local` config files (settings.local.json, CLAUDE.local.md)
+- Session transcripts
+
+### Important security considerations
+
+1. **Use a PRIVATE Git repository.** Your brain data is stored in plaintext. The plugin warns if it detects a public repo, but you are responsible for repo visibility.
+2. **Memory may contain sensitive context.** Claude stores information from your sessions in memory files. Review `~/.claude/projects/*/memory/` before initializing. The export runs a pattern-based secret scan and warns if potential API keys or tokens are found, but this is not exhaustive.
+3. **Git history is permanent.** Even if you later remove sensitive data from memory, it persists in Git history. Consider `git-filter-repo` or BFG Repo Cleaner if you need to purge history.
+4. **Auto-sync runs silently.** On every Claude Code session start/end, your brain is automatically pushed/pulled. The plugin creates backups before each import.
+5. **Semantic merge sends memory to Claude API.** When merging brains from multiple machines, memory content is sent to `claude -p` for intelligent deduplication. This is the same API your Claude Code sessions use.
+6. **Trust all machines in your network.** Imported skills, agents, and rules execute with Claude's permissions. A compromised machine could inject malicious instructions. Only add machines you fully control.
+7. **Backups are created automatically.** Before each import, a backup is saved to `~/.claude/brain-backups/`. Use `/brain-status` to check, and restore manually if needed.
+
 ## What It Does
 
 Claude Code accumulates knowledge over time: auto-memory, custom agents, skills, rules, settings, and CLAUDE.md instructions. This plugin makes that knowledge portable across all your machines.
@@ -61,18 +93,12 @@ Each machine pushes brain snapshots to a shared Git repo. When a machine pulls, 
 | Agents | Yes | Union by name |
 | Auto memory | Yes | Semantic merge |
 | Agent memory | Yes | Semantic merge |
-| Settings (hooks, permissions) | Yes | Deep merge |
+| Settings (hooks, permissions) | Yes | Deep merge (env vars excluded) |
 | Keybindings | Yes | Union |
-| MCP servers | Yes | Union, paths rewritten |
+| MCP servers | Yes | Union, paths rewritten, env vars stripped |
 | OAuth tokens | Never | Security |
 | Env vars | Never | Machine-specific |
-
-### What Never Leaves Your Machine
-
-- OAuth tokens and API keys
-- `~/.claude.json` (internal state)
-- Environment variables from settings
-- `.local` config files
+| MCP server env fields | Never | May contain API keys |
 
 ## Dependencies
 
@@ -113,6 +139,13 @@ No central server. Each machine merges on pull. Git handles transport.
 ```
 claude --plugin-dir ./claude-brain
 ```
+
+## Export flags
+
+| Flag | Description |
+|------|-------------|
+| `--skip-secret-scan` | Suppress the automatic secret pattern scan on export |
+| `--quiet` | Suppress informational output |
 
 ## License
 

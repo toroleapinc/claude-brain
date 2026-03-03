@@ -12,3 +12,10 @@ Thumbs.db
 # Local testing artifacts
 test-output/
 *.tmp
+
+# Secrets
+.env
+.env.*
+
+# Dependencies
+node_modules/

@@ -24,7 +24,7 @@ machine_id=$(get_config "machine_id")
 dirty=$(get_config "dirty" 2>/dev/null || echo "false")
 if [ "$dirty" = "true" ]; then
   log_info "Retrying dirty push from previous session..."
-  "${SCRIPT_DIR}/push.sh" --quiet || true
+  "${SCRIPT_DIR}/push.sh" --quiet --skip-secret-scan || true
 fi
 
 # Fetch latest
@@ -61,6 +61,8 @@ if [ "$snapshot_count" -eq 0 ]; then
   log_info "No machine snapshots found."
   exit 0
 fi
+
+mkdir -p "${BRAIN_REPO}/consolidated"
 
 if [ "$snapshot_count" -eq 1 ]; then
   # Only one machine — its snapshot IS the consolidated brain
@@ -110,7 +112,7 @@ else
   mv "${BRAIN_REPO}/consolidated/brain.json.merging" "${BRAIN_REPO}/consolidated/brain.json"
 fi
 
-# Apply consolidated brain locally
+# Apply consolidated brain locally (with validation and backup)
 "${SCRIPT_DIR}/import.sh" "${BRAIN_REPO}/consolidated/brain.json"
 
 # Commit and push consolidated
@@ -124,7 +126,7 @@ fi
 
 # Update local config
 if $_has_jq; then
-  local_tmp=$(mktemp)
+  local_tmp=$(brain_mktemp)
   jq --arg ts "$(now_iso)" '.last_pull = $ts' "$BRAIN_CONFIG" > "$local_tmp"
   mv "$local_tmp" "$BRAIN_CONFIG"
 fi

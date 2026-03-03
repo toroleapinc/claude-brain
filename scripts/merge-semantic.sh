@@ -165,7 +165,7 @@ cp "$BASE" "$OUTPUT"
 
 # Update CLAUDE.md
 if [ -n "$merged_claude_md" ]; then
-  tmp=$(mktemp)
+  tmp=$(brain_mktemp)
   jq --arg content "$merged_claude_md" \
     '.declarative.claude_md.content = $content | .declarative.claude_md.hash = "merged"' \
     "$OUTPUT" > "$tmp" && mv "$tmp" "$OUTPUT"
@@ -173,7 +173,7 @@ fi
 
 # Update memory entries
 if [ "$(echo "$merged_memory" | jq 'length')" -gt 0 ]; then
-  tmp=$(mktemp)
+  tmp=$(brain_mktemp)
   echo "$merged_memory" | jq -r 'keys[]' | while read -r project; do
     local content
     content=$(echo "$merged_memory" | jq -r --arg p "$project" '.[$p]')
@@ -197,7 +197,7 @@ if [ "$conflict_count" -gt 0 ]; then
 
   low_count=$(echo "$low_confidence" | jq 'length')
   if [ "$low_count" -gt 0 ]; then
-    tmp=$(mktemp)
+    tmp=$(brain_mktemp)
     jq --argjson new "$low_confidence" \
       '.conflicts = (.conflicts + $new)' "$conflicts_file" > "$tmp"
     mv "$tmp" "$conflicts_file"

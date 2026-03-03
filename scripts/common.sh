@@ -10,6 +10,26 @@ BRAIN_REPO="${CLAUDE_DIR}/brain-repo"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 DEFAULTS_FILE="${PLUGIN_ROOT}/config/defaults.json"
 
+# ── Temp File Management ──────────────────────────────────────────────────────
+# Track temp files for cleanup on exit/error
+_BRAIN_TEMP_FILES=()
+
+brain_mktemp() {
+  local tmp
+  tmp=$(mktemp "${TMPDIR:-/tmp}/claude-brain-XXXXXX")
+  chmod 600 "$tmp"
+  _BRAIN_TEMP_FILES+=("$tmp")
+  echo "$tmp"
+}
+
+_brain_cleanup_temps() {
+  for f in "${_BRAIN_TEMP_FILES[@]:-}"; do
+    rm -f "$f" 2>/dev/null || true
+  done
+}
+
+trap _brain_cleanup_temps EXIT
+
 # ── OS Detection ───────────────────────────────────────────────────────────────
 detect_os() {
   case "$(uname -s)" in
@@ -40,10 +60,12 @@ json_query() {
   if $_has_jq; then
     jq -r "$filter"
   elif $_has_python3; then
+    # Pass filter via argv to avoid injection
     python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-parts = '''${filter}'''.strip('.').split('.')
+filter_path = sys.argv[1]
+parts = filter_path.strip('.').split('.')
 result = data
 for p in parts:
     if p and isinstance(result, dict):
@@ -58,7 +80,7 @@ elif isinstance(result, (dict, list)):
     print(json.dumps(result))
 else:
     print(result)
-"
+" "$filter"
   else
     echo "ERROR: Neither jq nor python3 found. Install one of them." >&2
     return 1
@@ -97,21 +119,25 @@ json_set() {
   local file="$1" path="$2" value="$3"
   if $_has_jq; then
     local tmp
-    tmp=$(mktemp)
-    jq "${path} = ${value}" "$file" > "$tmp" && mv "$tmp" "$file"
+    tmp=$(brain_mktemp)
+    jq --argjson val "$value" "${path} = \$val" "$file" > "$tmp" && mv "$tmp" "$file"
   elif $_has_python3; then
+    # Pass file, path, value via argv to avoid injection
     python3 -c "
 import json, sys
-with open('${file}') as f:
+file_path = sys.argv[1]
+key_path = sys.argv[2]
+value_str = sys.argv[3]
+with open(file_path) as f:
     data = json.load(f)
-keys = '${path}'.strip('.').split('.')
+keys = key_path.strip('.').split('.')
 obj = data
 for k in keys[:-1]:
     obj = obj.setdefault(k, {})
-obj[keys[-1]] = json.loads('${value}')
-with open('${file}', 'w') as f:
+obj[keys[-1]] = json.loads(value_str)
+with open(file_path, 'w') as f:
     json.dump(data, f, indent=2)
-"
+" "$file" "$path" "$value"
   fi
 }
 
@@ -161,6 +187,15 @@ get_machine_id() {
 }
 
 get_machine_name() {
+  # Allow user-configured name, fall back to hostname
+  if [ -f "$BRAIN_CONFIG" ]; then
+    local custom_name
+    custom_name=$(json_query '.machine_name' < "$BRAIN_CONFIG" 2>/dev/null || echo "")
+    if [ -n "$custom_name" ] && [ "$custom_name" != "null" ]; then
+      echo "$custom_name"
+      return
+    fi
+  fi
   hostname 2>/dev/null || echo "unknown"
 }
 
@@ -207,6 +242,38 @@ brain_push_with_retry() {
   return 1
 }
 
+# ── URL Validation ─────────────────────────────────────────────────────────────
+validate_remote_url() {
+  # Warn if the remote URL appears to be a public repo
+  local url="$1"
+
+  # Check for common public patterns
+  if echo "$url" | grep -qiE '^https?://(github\.com|gitlab\.com|bitbucket\.org)'; then
+    log_warn "HTTPS URL detected. Make sure this repository is PRIVATE."
+    log_warn "Your brain data (memory, skills, settings) will be stored there."
+
+    # Try to check visibility via GitHub API if it looks like a github URL
+    local repo_path
+    repo_path=$(echo "$url" | sed -E 's|https?://github\.com/||; s|\.git$||')
+    if command -v curl &>/dev/null && echo "$url" | grep -q "github.com"; then
+      local visibility
+      visibility=$(curl -s -o /dev/null -w "%{http_code}" "https://api.github.com/repos/${repo_path}" 2>/dev/null || echo "000")
+      if [ "$visibility" = "200" ]; then
+        log_warn "WARNING: This GitHub repository appears to be PUBLIC!"
+        log_warn "Your brain contains sensitive configuration. Use a PRIVATE repo."
+        log_warn "To make it private: https://github.com/${repo_path}/settings"
+        return 1
+      fi
+    fi
+  fi
+
+  if echo "$url" | grep -qE '^git@|^ssh://'; then
+    log_info "SSH URL detected (typically private). Good."
+  fi
+
+  return 0
+}
+
 # ── Logging ────────────────────────────────────────────────────────────────────
 brain_log() {
   local level="$1"
@@ -236,7 +303,7 @@ append_merge_log() {
 
   if $_has_jq; then
     local tmp
-    tmp=$(mktemp)
+    tmp=$(brain_mktemp)
     jq --arg ts "$timestamp" \
        --arg mid "$machine_id" \
        --arg mn "$machine_name" \
@@ -245,16 +312,29 @@ append_merge_log() {
        '.entries = [{"timestamp":$ts,"machine_id":$mid,"machine_name":$mn,"action":$act,"summary":$sum}] + .entries | .entries = .entries[:200]' \
        "$log_file" > "$tmp" && mv "$tmp" "$log_file"
   elif $_has_python3; then
+    # Pass all data via argv to avoid injection
     python3 -c "
-import json
-with open('${log_file}') as f:
+import json, sys
+log_file = sys.argv[1]
+timestamp = sys.argv[2]
+machine_id = sys.argv[3]
+machine_name = sys.argv[4]
+action = sys.argv[5]
+summary = sys.argv[6]
+with open(log_file) as f:
     data = json.load(f)
-entry = {'timestamp':'${timestamp}','machine_id':'${machine_id}','machine_name':'${machine_name}','action':'${action}','summary':$(printf '%s' "$summary" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}
+entry = {
+    'timestamp': timestamp,
+    'machine_id': machine_id,
+    'machine_name': machine_name,
+    'action': action,
+    'summary': summary
+}
 data['entries'] = [entry] + data.get('entries', [])
 data['entries'] = data['entries'][:200]
-with open('${log_file}', 'w') as f:
+with open(log_file, 'w') as f:
     json.dump(data, f, indent=2)
-"
+" "$log_file" "$timestamp" "$machine_id" "$machine_name" "$action" "$summary"
   fi
 }
 
@@ -282,16 +362,148 @@ check_dependencies() {
   fi
 }
 
+# ── Secret Scanning ──────────────────────────────────────────────────────────
+# Scans text for common secret patterns and warns the user
+SECRET_PATTERNS=(
+  'sk-[a-zA-Z0-9]{20,}'                           # OpenAI/Anthropic API keys
+  'key-[a-zA-Z0-9]{20,}'                          # Generic API keys
+  'AKIA[0-9A-Z]{16}'                              # AWS access key IDs
+  'ghp_[a-zA-Z0-9]{20,}'                          # GitHub personal access tokens
+  'gho_[a-zA-Z0-9]{20,}'                          # GitHub OAuth tokens
+  'github_pat_[a-zA-Z0-9_]{22,}'                  # GitHub fine-grained tokens
+  'glpat-[a-zA-Z0-9]{20,}'                        # GitLab personal access tokens
+  'xoxb-[0-9]{10,}-[a-zA-Z0-9]{20,}'              # Slack bot tokens
+  'xoxp-[0-9]{10,}-[a-zA-Z0-9]{20,}'              # Slack user tokens
+  'Bearer [a-zA-Z0-9._+/=-]{20,}'                 # Bearer tokens
+  'postgres(ql)?://[^:]+:[^@]+@'                   # PostgreSQL connection strings
+  'mysql://[^:]+:[^@]+@'                           # MySQL connection strings
+  'mongodb(\+srv)?://[^:]+:[^@]+@'                 # MongoDB connection strings
+  'redis://:[^@]+@'                                # Redis connection strings
+  'password[" ]*[:=][" ]*[^ ]{8,}'                # Password assignments
+  'secret[" ]*[:=][" ]*[^ ]{8,}'                  # Secret assignments
+  'token[" ]*[:=][" ]*[a-zA-Z0-9._]{20,}'         # Token assignments
+  'PRIVATE KEY-----'                               # Private keys
+)
+
+scan_for_secrets() {
+  # Scans content from stdin for common secret patterns
+  # Returns 0 if no secrets found, 1 if secrets detected
+  # Outputs warnings to stderr
+  local content
+  content=$(cat)
+  local found=0
+
+  for pattern in "${SECRET_PATTERNS[@]}"; do
+    local matches
+    matches=$(echo "$content" | grep -oEi "$pattern" 2>/dev/null | head -5 || true)
+    if [ -n "$matches" ]; then
+      if [ "$found" -eq 0 ]; then
+        log_warn "POTENTIAL SECRETS DETECTED in brain data:"
+        found=1
+      fi
+      # Show redacted match
+      while IFS= read -r match; do
+        local redacted
+        redacted=$(echo "$match" | head -c 12)
+        log_warn "  Pattern match: ${redacted}... (redacted)"
+      done <<< "$matches"
+    fi
+  done
+
+  if [ "$found" -eq 1 ]; then
+    log_warn "Review your memory files and remove secrets before syncing."
+    log_warn "Use --skip-secret-scan to suppress this warning."
+    return 1
+  fi
+  return 0
+}
+
+# ── Size Guards ──────────────────────────────────────────────────────────────
+MAX_SNAPSHOT_SIZE_BYTES=$((10 * 1024 * 1024))  # 10 MB
+MAX_SINGLE_FILE_BYTES=$((1 * 1024 * 1024))     # 1 MB
+
+check_file_size() {
+  local file="$1" max="${2:-$MAX_SINGLE_FILE_BYTES}"
+  if [ -f "$file" ]; then
+    local size
+    size=$(wc -c < "$file" | tr -d ' ')
+    if [ "$size" -gt "$max" ]; then
+      log_warn "File $file is very large (${size} bytes). This may cause issues."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# ── Backup / Restore ─────────────────────────────────────────────────────────
+BACKUP_DIR="${CLAUDE_DIR}/brain-backups"
+
+backup_before_import() {
+  # Create a timestamped backup of current brain state before importing
+  local timestamp
+  timestamp=$(date +%Y%m%d-%H%M%S)
+  local backup_path="${BACKUP_DIR}/${timestamp}"
+  mkdir -p "$backup_path"
+
+  # Back up key files
+  [ -f "${CLAUDE_DIR}/CLAUDE.md" ] && cp "${CLAUDE_DIR}/CLAUDE.md" "${backup_path}/" 2>/dev/null || true
+  [ -d "${CLAUDE_DIR}/rules" ] && cp -r "${CLAUDE_DIR}/rules" "${backup_path}/" 2>/dev/null || true
+  [ -d "${CLAUDE_DIR}/skills" ] && cp -r "${CLAUDE_DIR}/skills" "${backup_path}/" 2>/dev/null || true
+  [ -d "${CLAUDE_DIR}/agents" ] && cp -r "${CLAUDE_DIR}/agents" "${backup_path}/" 2>/dev/null || true
+  [ -f "${CLAUDE_DIR}/settings.json" ] && cp "${CLAUDE_DIR}/settings.json" "${backup_path}/" 2>/dev/null || true
+  [ -f "${CLAUDE_DIR}/keybindings.json" ] && cp "${CLAUDE_DIR}/keybindings.json" "${backup_path}/" 2>/dev/null || true
+
+  # Prune old backups (keep last 5)
+  if [ -d "$BACKUP_DIR" ]; then
+    ls -1d "${BACKUP_DIR}"/[0-9]* 2>/dev/null | sort | head -n -5 | while read -r old; do
+      rm -rf "$old"
+    done
+  fi
+
+  log_info "Backup created: ${backup_path}"
+  echo "$backup_path"
+}
+
+restore_from_backup() {
+  local backup_path="$1"
+  if [ ! -d "$backup_path" ]; then
+    log_error "Backup not found: $backup_path"
+    return 1
+  fi
+
+  log_info "Restoring from backup: $backup_path"
+  [ -f "${backup_path}/CLAUDE.md" ] && cp "${backup_path}/CLAUDE.md" "${CLAUDE_DIR}/" 2>/dev/null || true
+  [ -d "${backup_path}/rules" ] && cp -r "${backup_path}/rules" "${CLAUDE_DIR}/" 2>/dev/null || true
+  [ -d "${backup_path}/skills" ] && cp -r "${backup_path}/skills" "${CLAUDE_DIR}/" 2>/dev/null || true
+  [ -d "${backup_path}/agents" ] && cp -r "${backup_path}/agents" "${CLAUDE_DIR}/" 2>/dev/null || true
+  [ -f "${backup_path}/settings.json" ] && cp "${backup_path}/settings.json" "${CLAUDE_DIR}/" 2>/dev/null || true
+  [ -f "${backup_path}/keybindings.json" ] && cp "${backup_path}/keybindings.json" "${CLAUDE_DIR}/" 2>/dev/null || true
+  log_info "Restore complete."
+}
+
+list_backups() {
+  if [ -d "$BACKUP_DIR" ]; then
+    ls -1d "${BACKUP_DIR}"/[0-9]* 2>/dev/null | sort -r
+  else
+    echo "No backups found."
+  fi
+}
+
 # ── Path Encoding/Decoding ─────────────────────────────────────────────────────
-# Claude Code encodes project paths: /home/user/project → -home-user-project
+# Claude Code encodes project paths: /home/user/my-project → -home-user-my--project
+# Hyphens in names are doubled: my-project → my--project
+# Leading slash becomes leading hyphen
 decode_project_path() {
   local encoded="$1"
-  echo "$encoded" | sed 's/^-/\//' | sed 's/-/\//g'
+  # First restore leading slash, then un-double hyphens temporarily,
+  # then convert remaining single hyphens to slashes, then restore hyphens
+  echo "$encoded" | sed 's/^-/\//' | sed 's/--/\x00/g' | sed 's/-/\//g' | sed 's/\x00/-/g'
 }
 
 encode_project_path() {
   local path="$1"
-  echo "$path" | sed 's/\//-/g'
+  # Double any hyphens in the path first, then convert slashes to hyphens
+  echo "$path" | sed 's/-/--/g' | sed 's/\//-/g'
 }
 
 # Extract a human-friendly project name from encoded path

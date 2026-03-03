@@ -6,11 +6,13 @@ source "${SCRIPT_DIR}/common.sh"
 
 QUIET=false
 FORCE=false
+SKIP_SECRET_SCAN=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --quiet) QUIET=true; BRAIN_QUIET=true; shift ;;
     --force) FORCE=true; shift ;;
+    --skip-secret-scan) SKIP_SECRET_SCAN=true; shift ;;
     *) shift ;;
   esac
 done
@@ -23,7 +25,10 @@ snapshot_dir="${BRAIN_REPO}/machines/${machine_id}"
 
 # Export fresh snapshot
 mkdir -p "$snapshot_dir"
-"${SCRIPT_DIR}/export.sh" --output "${snapshot_dir}/brain-snapshot.json" ${QUIET:+--quiet}
+export_args=(--output "${snapshot_dir}/brain-snapshot.json")
+$QUIET && export_args+=(--quiet)
+$SKIP_SECRET_SCAN && export_args+=(--skip-secret-scan)
+"${SCRIPT_DIR}/export.sh" "${export_args[@]}"
 
 # Check if anything actually changed
 if ! $FORCE; then
@@ -47,7 +52,7 @@ brain_git commit -m "Sync: $(get_machine_name) (${machine_id}) at $(now_iso)" 2>
 if brain_push_with_retry 3 2; then
   # Update local config
   if $_has_jq; then
-    local_tmp=$(mktemp)
+    local_tmp=$(brain_mktemp)
     jq --arg ts "$(now_iso)" '.last_push = $ts | .dirty = false' "$BRAIN_CONFIG" > "$local_tmp"
     mv "$local_tmp" "$BRAIN_CONFIG"
   fi
@@ -55,7 +60,7 @@ if brain_push_with_retry 3 2; then
 else
   # Mark dirty for retry on next session start
   if $_has_jq; then
-    local_tmp=$(mktemp)
+    local_tmp=$(brain_mktemp)
     jq '.dirty = true' "$BRAIN_CONFIG" > "$local_tmp"
     mv "$local_tmp" "$BRAIN_CONFIG"
   fi

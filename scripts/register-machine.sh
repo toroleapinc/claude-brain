@@ -28,7 +28,7 @@ register_machine() {
         encoded=$(basename "$dir")
         local name
         name=$(project_name_from_encoded "$encoded")
-        echo "{\"encoded\":\"${encoded}\",\"name\":\"${name}\"}"
+        jq -n --arg encoded "$encoded" --arg name "$name" '{"encoded": $encoded, "name": $name}'
       done | jq -s '.' 2>/dev/null || echo "[]")
     else
       projects="[]"
@@ -60,24 +60,25 @@ register_machine() {
         dirty: false
       }' > "$BRAIN_CONFIG"
   elif $_has_python3; then
+    # Pass all data via argv to avoid injection
     python3 -c "
-import json
+import json, sys
 config = {
     'version': '1.0.0',
-    'remote': '${remote}',
-    'machine_id': '${machine_id}',
-    'machine_name': '${machine_name}',
-    'os': '${os_type}',
-    'brain_repo_path': '${BRAIN_REPO}',
+    'remote': sys.argv[1],
+    'machine_id': sys.argv[2],
+    'machine_name': sys.argv[3],
+    'os': sys.argv[4],
+    'brain_repo_path': sys.argv[5],
     'auto_sync': True,
-    'registered_at': '${timestamp}',
+    'registered_at': sys.argv[6],
     'last_push': None,
     'last_pull': None,
     'dirty': False
 }
-with open('${BRAIN_CONFIG}', 'w') as f:
+with open(sys.argv[7], 'w') as f:
     json.dump(config, f, indent=2)
-"
+" "$remote" "$machine_id" "$machine_name" "$os_type" "$BRAIN_REPO" "$timestamp" "$BRAIN_CONFIG"
   fi
 
   # Update machines.json in brain repo if it exists
@@ -89,7 +90,7 @@ with open('${BRAIN_CONFIG}', 'w') as f:
 
     if $_has_jq; then
       local tmp
-      tmp=$(mktemp)
+      tmp=$(brain_mktemp)
       jq --arg mid "$machine_id" \
          --arg mn "$machine_name" \
          --arg os "$os_type" \
@@ -103,21 +104,28 @@ with open('${BRAIN_CONFIG}', 'w') as f:
            "projects": $projects
          }' "$machines_file" > "$tmp" && mv "$tmp" "$machines_file"
     elif $_has_python3; then
+      # Pass all data via argv to avoid injection
       python3 -c "
-import json
-with open('${machines_file}') as f:
+import json, sys
+machines_file = sys.argv[1]
+machine_id = sys.argv[2]
+machine_name = sys.argv[3]
+os_type = sys.argv[4]
+timestamp = sys.argv[5]
+projects_json = sys.argv[6]
+with open(machines_file) as f:
     data = json.load(f)
 data.setdefault('machines', {})
-data['machines']['${machine_id}'] = {
-    'name': '${machine_name}',
-    'os': '${os_type}',
-    'registered_at': '${timestamp}',
-    'last_sync': '${timestamp}',
-    'projects': json.loads('${projects}')
+data['machines'][machine_id] = {
+    'name': machine_name,
+    'os': os_type,
+    'registered_at': timestamp,
+    'last_sync': timestamp,
+    'projects': json.loads(projects_json)
 }
-with open('${machines_file}', 'w') as f:
+with open(machines_file, 'w') as f:
     json.dump(data, f, indent=2)
-"
+" "$machines_file" "$machine_id" "$machine_name" "$os_type" "$timestamp" "$projects"
     fi
   fi
 

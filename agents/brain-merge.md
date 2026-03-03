@@ -1,8 +1,8 @@
 ---
 name: brain-merge
 description: Semantically merge brain knowledge from multiple Claude Code machines. Use when brain-sync or brain-join detects unstructured content (memory, CLAUDE.md) that needs intelligent merging. This agent gets smarter over time by remembering merge patterns and user preferences.
-tools: Read, Write, Bash, Grep
-disallowedTools: WebSearch, WebFetch
+tools: Read, Write, Grep
+disallowedTools: WebSearch, WebFetch, Bash
 model: sonnet
 memory: user
 maxTurns: 10
