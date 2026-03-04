@@ -144,3 +144,35 @@ if [ -f "$conflicts_file" ]; then
     echo "  ${unresolved} unresolved conflict(s). Run /brain-conflicts to resolve."
   fi
 fi
+
+# ── Sync Statistics ────────────────────────────────────────────────────────────
+if [ -f "${BRAIN_REPO}/meta/machines.json" ]; then
+  echo "=== Sync Statistics ==="
+  echo ""
+  
+  # Count total syncs (entries in machines.json)
+  total_syncs=$(jq '.machines | to_entries | map(.value.last_sync | select(. != null)) | length' "${BRAIN_REPO}/meta/machines.json")
+  echo "Total syncs: ${total_syncs}"
+  
+  # Get machine count
+  machine_count=$(jq '.machines | length' "${BRAIN_REPO}/meta/machines.json")
+  echo "Machines synced: ${machine_count}"
+  
+  # Get first and last sync dates
+  first_sync=$(jq -r '[.machines[] | .last_sync] | map(select(. != null)) | sort | first' "${BRAIN_REPO}/meta/machines.json")
+  last_sync=$(jq -r '[.machines[] | .last_sync] | map(select(. != null)) | sort | last' "${BRAIN_REPO}/meta/machines.json")
+  
+  if [ "$first_sync" != "null" ] && [ -n "$first_sync" ]; then
+    echo "First sync: ${first_sync%%T*}"
+  else
+    echo "First sync: N/A"
+  fi
+  
+  if [ "$last_sync" != "null" ] && [ -n "$last_sync" ]; then
+    echo "Last sync: ${last_sync%%T*}"
+  else
+    echo "Last sync: N/A"
+  fi
+  
+  echo ""
+fi
