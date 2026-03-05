@@ -522,9 +522,13 @@ backup_before_import() {
 
   # Prune old backups (keep last 5)
   if [ -d "$BACKUP_DIR" ]; then
-    ls -1d "${BACKUP_DIR}"/[0-9]* 2>/dev/null | sort | head -n -5 | while read -r old; do
+    local total_backups
+    total_backups=$(ls -1d "${BACKUP_DIR}"/[0-9]* 2>/dev/null | wc -l)
+    if [ "$total_backups" -gt 5 ]; then
+    ls -1d "${BACKUP_DIR}"/[0-9]* 2>/dev/null | sort | head -n "$(( total_backups - 5 ))" | while read -r old; do
       rm -rf "$old"
     done
+    fi
   fi
 
   log_info "Backup created: ${backup_path}"

@@ -54,12 +54,12 @@ import_dir_entries() {
 
   # Resolve base_dir to absolute path for traversal check
   local resolved_base
-  resolved_base=$(realpath -m "$base_dir")
+  resolved_base=$(python3 -c "import os; print(os.path.realpath('$base_dir'))" 2>/dev/null || realpath "$base_dir" 2>/dev/null || echo "$base_dir")
 
     echo "$json_entries" | jq -r 'keys[]' | while read -r key; do
       # PATH TRAVERSAL CHECK: ensure key doesn't escape base_dir
       local resolved_target
-      resolved_target=$(realpath -m "${resolved_base}/${key}")
+      resolved_target=$(python3 -c "import os; print(os.path.realpath('${resolved_base}/${key}'))" 2>/dev/null || realpath "${resolved_base}/${key}" 2>/dev/null || echo "${resolved_base}/${key}")
       if [[ "$resolved_target" != "${resolved_base}/"* ]]; then
         log_warn "BLOCKED path traversal attempt: ${key} (would write outside ${base_dir})"
         continue

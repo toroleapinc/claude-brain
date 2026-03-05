@@ -169,3 +169,4 @@ if $AUTO_MODE; then
   
   log_info "Auto-evolve complete. High-confidence changes applied."
   log_info "Evolution analysis saved to meta/last-evolve.json"
+fi
