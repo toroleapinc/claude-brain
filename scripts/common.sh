@@ -3,10 +3,10 @@
 set -euo pipefail
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-CLAUDE_DIR="${HOME}/.claude"
-CLAUDE_JSON="${HOME}/.claude.json"
-BRAIN_CONFIG="${CLAUDE_DIR}/brain-config.json"
-BRAIN_REPO="${CLAUDE_DIR}/brain-repo"
+CLAUDE_DIR="${CLAUDE_DIR:-${HOME}/.claude}"
+CLAUDE_JSON="${CLAUDE_JSON:-${HOME}/.claude.json}"
+BRAIN_CONFIG="${BRAIN_CONFIG:-${CLAUDE_DIR}/brain-config.json}"
+BRAIN_REPO="${BRAIN_REPO:-${CLAUDE_DIR}/brain-repo}"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 DEFAULTS_FILE="${PLUGIN_ROOT}/config/defaults.json"
 

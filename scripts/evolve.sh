@@ -163,10 +163,9 @@ if $AUTO_MODE; then
   
   # Extract high-confidence promotions (not implemented yet - would need promotion logic)
   # For now, just update last_evolved timestamp
-    local_tmp=$(brain_mktemp)
-    jq --arg ts "$(now_iso)" '.last_evolved = $ts' "$BRAIN_CONFIG" > "$local_tmp"
-    mv "$local_tmp" "$BRAIN_CONFIG"
-  fi
+  local_tmp=$(brain_mktemp)
+  jq --arg ts "$(now_iso)" '.last_evolved = $ts' "$BRAIN_CONFIG" > "$local_tmp"
+  mv "$local_tmp" "$BRAIN_CONFIG"
   
   log_info "Auto-evolve complete. High-confidence changes applied."
   log_info "Evolution analysis saved to meta/last-evolve.json"

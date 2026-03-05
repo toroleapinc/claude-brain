@@ -136,7 +136,7 @@ fi
 
 # Check if auto-evolve is due
 if [ -f "$DEFAULTS_FILE" ]; then
-  local evolve_interval_days last_evolved days_since_evolve
+  evolve_interval_days="" last_evolved="" days_since_evolve=""
   evolve_interval_days=$(jq -r '.evolve_interval_days // 7' "$DEFAULTS_FILE")
   last_evolved=$(jq -r '.last_evolved // null' "$BRAIN_CONFIG")
   

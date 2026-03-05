@@ -260,7 +260,6 @@ snapshot=$(echo "$snapshot" | jq --arg h "sha256:${snapshot_hash}" '. + {snapsho
 if [ -n "$OUTPUT" ]; then
   if encryption_enabled && command -v age &>/dev/null; then
     # Encrypt the snapshot before writing
-    local encrypted_snapshot
     encrypted_snapshot=$(encrypt_content "$snapshot") || {
       log_error "Failed to encrypt snapshot"
       exit 1
