@@ -217,7 +217,7 @@ import_brain() {
       local tmp tmp_remote
       tmp=$(brain_mktemp)
       tmp_remote=$(brain_mktemp)
-      echo "$new_settings" > "$tmp_remote"
+      printf '%s\n' "$new_settings" > "$tmp_remote"
       # Merge: keep local env and mcpServers, merge everything else from consolidated
       jq -s '.[0] as $local | .[1] as $remote |
         ($local.env // {}) as $local_env |
@@ -241,7 +241,7 @@ import_brain() {
         local tmp tmp_remote_kb
         tmp=$(brain_mktemp)
         tmp_remote_kb=$(brain_mktemp)
-        echo "$new_keybindings" > "$tmp_remote_kb"
+        printf '%s\n' "$new_keybindings" > "$tmp_remote_kb"
         # Union keybindings arrays (deduplicate by key+command)
         jq -s '.[0] + .[1] | unique_by(.key, .command)' "${CLAUDE_DIR}/keybindings.json" "$tmp_remote_kb" > "$tmp"
         mv "$tmp" "${CLAUDE_DIR}/keybindings.json"
