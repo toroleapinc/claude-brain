@@ -152,7 +152,7 @@ SCHEMA='{
 # ── Call claude -p ─────────────────────────────────────────────────────────────
 log_info "Running semantic merge via claude..."
 
-RESULT=$(claude -p "$(cat "$PROMPT_FILE")" \
+RESULT=$(cat "$PROMPT_FILE" | claude -p - \
   --output-format json \
   --json-schema "$SCHEMA" \
   --model sonnet \
