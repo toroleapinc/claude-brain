@@ -214,14 +214,16 @@ import_brain() {
     local new_settings
     new_settings=$(echo "$brain" | jq '.environmental.settings.content // null')
     if [ "$new_settings" != "null" ] && [ -f "${CLAUDE_DIR}/settings.json" ]; then
-      local tmp
+      local tmp tmp_remote
       tmp=$(brain_mktemp)
+      tmp_remote=$(brain_mktemp)
+      echo "$new_settings" > "$tmp_remote"
       # Merge: keep local env and mcpServers, merge everything else from consolidated
       jq -s '.[0] as $local | .[1] as $remote |
         ($local.env // {}) as $local_env |
         ($local.mcpServers // {}) as $local_mcp |
         ($remote // {}) * $local | .env = $local_env | .mcpServers = $local_mcp' \
-        "${CLAUDE_DIR}/settings.json" <(echo "$new_settings") > "$tmp"
+        "${CLAUDE_DIR}/settings.json" "$tmp_remote" > "$tmp"
       mv "$tmp" "${CLAUDE_DIR}/settings.json"
       chmod 600 "${CLAUDE_DIR}/settings.json"
       log_info "Updated: settings.json (merged, local env and mcpServers preserved)"
@@ -236,10 +238,12 @@ import_brain() {
     new_keybindings=$(echo "$brain" | jq '.environmental.keybindings.content // null')
     if [ "$new_keybindings" != "null" ]; then
       if [ -f "${CLAUDE_DIR}/keybindings.json" ]; then
-        local tmp
+        local tmp tmp_remote_kb
         tmp=$(brain_mktemp)
+        tmp_remote_kb=$(brain_mktemp)
+        echo "$new_keybindings" > "$tmp_remote_kb"
         # Union keybindings arrays (deduplicate by key+command)
-        jq -s '.[0] + .[1] | unique_by(.key, .command)' "${CLAUDE_DIR}/keybindings.json" <(echo "$new_keybindings") > "$tmp"
+        jq -s '.[0] + .[1] | unique_by(.key, .command)' "${CLAUDE_DIR}/keybindings.json" "$tmp_remote_kb" > "$tmp"
         mv "$tmp" "${CLAUDE_DIR}/keybindings.json"
         log_info "Updated: keybindings.json (merged)"
       else
