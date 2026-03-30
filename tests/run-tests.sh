@@ -744,6 +744,55 @@ EOF
   fi
 }
 
+test_register_machine_preserves_timestamps() {
+  section "register-machine.sh preserves existing sync timestamps"
+
+  # Initial registration (creates brain-config.json from scratch)
+  rm -f "$BRAIN_CONFIG"
+  bash "$PROJECT_DIR/scripts/register-machine.sh" "git@github.com:test/test.git" 2>/dev/null || true
+
+  if [ ! -f "$BRAIN_CONFIG" ]; then
+    fail "brain-config.json not created on first registration"
+    return
+  fi
+
+  # Seed known timestamps into the config
+  local known_push="2025-01-15T10:00:00Z"
+  local known_pull="2025-01-14T09:00:00Z"
+  local known_evolved="2025-01-13T08:00:00Z"
+  json_set "$BRAIN_CONFIG" "last_push" "$known_push"
+  json_set "$BRAIN_CONFIG" "last_pull" "$known_pull"
+  json_set "$BRAIN_CONFIG" "last_evolved" "$known_evolved"
+
+  # Re-register (simulates what push.sh does mid-run to update machines.json)
+  bash "$PROJECT_DIR/scripts/register-machine.sh" "git@github.com:test/test.git" 2>/dev/null || true
+
+  local actual_push actual_pull actual_evolved
+  actual_push=$(jqr ".last_push" "$BRAIN_CONFIG")
+  actual_pull=$(jqr ".last_pull" "$BRAIN_CONFIG")
+  actual_evolved=$(jqr ".last_evolved" "$BRAIN_CONFIG")
+
+  [ "$actual_push" = "$known_push" ] \
+    && pass "last_push preserved after re-registration" \
+    || fail "last_push wiped by re-registration (got '$actual_push', expected '$known_push')"
+
+  [ "$actual_pull" = "$known_pull" ] \
+    && pass "last_pull preserved after re-registration" \
+    || fail "last_pull wiped by re-registration (got '$actual_pull', expected '$known_pull')"
+
+  [ "$actual_evolved" = "$known_evolved" ] \
+    && pass "last_evolved preserved after re-registration" \
+    || fail "last_evolved wiped by re-registration (got '$actual_evolved', expected '$known_evolved')"
+
+  # Verify null stays null on a brand-new config (never pushed)
+  rm -f "$BRAIN_CONFIG"
+  bash "$PROJECT_DIR/scripts/register-machine.sh" "git@github.com:test/test.git" 2>/dev/null || true
+  actual_push=$(jqr ".last_push" "$BRAIN_CONFIG")
+  [ "$actual_push" = "null" ] \
+    && pass "last_push is null on fresh registration (never pushed)" \
+    || fail "last_push should be null on fresh registration (got '$actual_push')"
+}
+
 # ── Run ────────────────────────────────────────────────────────────────────────
 echo -e "${CYAN}claude-brain integration tests${NC}"
 echo "================================"
@@ -762,6 +811,7 @@ test_secret_scanning
 test_export_import_roundtrip
 test_structured_merge
 test_register_machine
+test_register_machine_preserves_timestamps
 test_shared_namespace
 test_auto_evolve_trigger
 test_path_traversal_blocked

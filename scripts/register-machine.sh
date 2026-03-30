@@ -30,6 +30,18 @@ register_machine() {
   os_type=$(detect_os)
   timestamp=$(now_iso)
 
+  # Preserve sync timestamps from existing config so re-registration doesn't wipe them
+  local last_push="null" last_pull="null" last_evolved="null"
+  if [ -f "$BRAIN_CONFIG" ]; then
+    local _lp _lpull _le
+    _lp=$(jq -r '.last_push // "null"' "$BRAIN_CONFIG")
+    _lpull=$(jq -r '.last_pull // "null"' "$BRAIN_CONFIG")
+    _le=$(jq -r '.last_evolved // "null"' "$BRAIN_CONFIG")
+    [ "$_lp" != "null" ] && last_push="\"${_lp}\""
+    [ "$_lpull" != "null" ] && last_pull="\"${_lpull}\""
+    [ "$_le" != "null" ] && last_evolved="\"${_le}\""
+  fi
+
   # Discover tracked projects
   local projects="[]"
   if [ -d "${CLAUDE_DIR}/projects" ]; then
@@ -55,6 +67,9 @@ register_machine() {
         --arg repo "$BRAIN_REPO" \
         --argjson sync true \
         --arg ts "$timestamp" \
+        --argjson lp "$last_push" \
+        --argjson lpull "$last_pull" \
+        --argjson le "$last_evolved" \
         --arg identity "${HOME}/.claude/brain-age-key.txt" \
         --arg recipients "${BRAIN_REPO}/meta/recipients.txt" \
         '{
@@ -66,9 +81,9 @@ register_machine() {
           brain_repo_path: $repo,
           auto_sync: $sync,
           registered_at: $ts,
-          last_push: null,
-          last_pull: null,
-          last_evolved: null,
+          last_push: $lp,
+          last_pull: $lpull,
+          last_evolved: $le,
           dirty: false,
           encryption: {
             enabled: true,
@@ -86,6 +101,9 @@ register_machine() {
         --arg repo "$BRAIN_REPO" \
         --argjson sync true \
         --arg ts "$timestamp" \
+        --argjson lp "$last_push" \
+        --argjson lpull "$last_pull" \
+        --argjson le "$last_evolved" \
         '{
           version: $ver,
           remote: $remote,
@@ -95,9 +113,9 @@ register_machine() {
           brain_repo_path: $repo,
           auto_sync: $sync,
           registered_at: $ts,
-          last_push: null,
-          last_pull: null,
-          last_evolved: null,
+          last_push: $lp,
+          last_pull: $lpull,
+          last_evolved: $le,
           dirty: false,
           encryption: {
             enabled: false
