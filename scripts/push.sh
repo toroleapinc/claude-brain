@@ -33,8 +33,12 @@ $SKIP_SECRET_SCAN && export_args+=(--skip-secret-scan)
 "${SCRIPT_DIR}/export.sh" "${export_args[@]}"
 
 # Check if anything actually changed
+# Uses `git status --porcelain` to detect both modified (tracked) AND new (untracked)
+# files. Previously used `git diff --quiet`, which only examines tracked files —
+# this silently skipped first-time registrations whose machines/<id>/ directory
+# is brand-new and untracked.
 if ! $FORCE && ! $DRY_RUN; then
-  if brain_git diff --quiet -- "machines/${machine_id}/" 2>/dev/null; then
+  if [ -z "$(brain_git status --porcelain -- "machines/${machine_id}/" 2>/dev/null)" ]; then
     log_info "No changes to push."
     exit 0
   fi
