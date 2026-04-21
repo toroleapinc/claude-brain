@@ -4,7 +4,7 @@
   "auto_sync": true,
   "max_memory_lines": 200,
   "max_merge_log_entries": 200,
-  "max_budget_usd": 0.50,
+  "max_budget_usd": 3.00,
   "push_retry_attempts": 3,
   "push_retry_delay_seconds": 2,
   "sync_timeout_seconds": 30,
