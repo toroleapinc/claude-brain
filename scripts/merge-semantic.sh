@@ -156,7 +156,7 @@ RESULT=$(cat "$PROMPT_FILE" | claude -p - \
   --output-format json \
   --json-schema "$SCHEMA" \
   --model sonnet \
-  --max-turns 1 \
+  --max-turns 3 \
   --max-budget-usd "$MAX_BUDGET" \
   2>/dev/null) || {
   log_warn "claude -p failed. Falling back to concatenation merge."
