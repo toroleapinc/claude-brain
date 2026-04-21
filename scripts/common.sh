@@ -367,7 +367,7 @@ encrypt_content() {
     return 1
   fi
   
-  echo "$content" | age -R "$recipients_file" 2>/dev/null || {
+  echo "$content" | age -a -R "$recipients_file" 2>/dev/null || {
     log_error "Failed to encrypt content"
     return 1
   }
@@ -406,7 +406,7 @@ encrypt_file() {
     return 1
   fi
   
-  age -R "$recipients_file" -o "$output_file" "$input_file" 2>/dev/null || {
+  age -a -R "$recipients_file" -o "$output_file" "$input_file" 2>/dev/null || {
     log_error "Failed to encrypt file: $input_file"
     return 1
   }
