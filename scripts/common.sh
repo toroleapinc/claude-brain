@@ -566,9 +566,10 @@ list_backups() {
 # Leading slash becomes leading hyphen
 decode_project_path() {
   local encoded="$1"
-  # First restore leading slash, then un-double hyphens temporarily,
-  # then convert remaining single hyphens to slashes, then restore hyphens
-  echo "$encoded" | sed 's/^-/\//' | sed 's/--/\x00/g' | sed 's/-/\//g' | sed 's/\x00/-/g'
+  # Use a rare sentinel string to temporarily hold doubled hyphens
+  # (avoids \x00 which BSD sed on macOS does not support).
+  local SENTINEL='__BRAIN_DH__'
+  echo "$encoded" | sed 's/^-/\//' | sed "s/--/${SENTINEL}/g" | sed 's/-/\//g' | sed "s/${SENTINEL}/-/g"
 }
 
 encode_project_path() {
