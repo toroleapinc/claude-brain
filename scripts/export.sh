@@ -51,7 +51,13 @@ scan_dir_entries() {
   fi
 
     local scan_result
-    scan_result=$(find "$dir" -type f 2>/dev/null | sort | while read -r f; do
+    # Prune hidden dirs (.venv, .git, .cache), package dirs, and skip dotfiles + *.env
+    # The dotfile exclusion is critical: .env files commonly hold API keys and must
+    # never reach the brain snapshot (which is pushed to a Git remote).
+    scan_result=$(find "$dir" \
+        \( -type d \( -name ".*" -o -name "node_modules" -o -name "__pycache__" -o -name "venv" \) -prune \) \
+        -o \( -type f ! -name ".*" ! -name "*.env" ! -name "*.pem" ! -name "*.key" -print \) \
+        2>/dev/null | sort | while read -r f; do
       # Size guard per file
       if ! check_file_size "$f" 2>/dev/null; then
         continue
@@ -190,55 +196,73 @@ build_snapshot() {
   fi
 
   # Assemble full snapshot
-    jq -n \
-      --arg schema_ver "1.0.0" \
-      --arg ts "$timestamp" \
-      --arg mid "$machine_id" \
-      --arg mn "$machine_name" \
-      --arg os "$os_type" \
-      --argjson claude_md "${claude_md:-null}" \
-      --argjson rules "$rules" \
-      --argjson skills "$skills" \
-      --argjson agents "$agents" \
-      --argjson output_styles "$output_styles" \
-      --argjson auto_memory "$auto_memory" \
-      --argjson agent_memory "$agent_memory" \
-      --argjson settings "${settings:-null}" \
-      --arg settings_hash "${settings_hash}" \
-      --argjson keybindings "${keybindings:-null}" \
-      --arg keybindings_hash "${keybindings_hash}" \
-      --argjson mcp_servers "$mcp_servers" \
-      --argjson shared_skills "$shared_skills" \
-      --argjson shared_agents "$shared_agents" \
-      --argjson shared_rules "$shared_rules" \
-      '{
-        schema_version: $schema_ver,
-        exported_at: $ts,
-        machine: { id: $mid, name: $mn, os: $os },
-        declarative: {
-          claude_md: $claude_md,
-          rules: $rules
-        },
-        procedural: {
-          skills: $skills,
-          agents: $agents,
-          output_styles: $output_styles
-        },
-        experiential: {
-          auto_memory: $auto_memory,
-          agent_memory: $agent_memory
-        },
-        environmental: {
-          settings: { content: $settings, hash: ("sha256:" + $settings_hash) },
-          keybindings: { content: $keybindings, hash: ("sha256:" + $keybindings_hash) },
-          mcp_servers: $mcp_servers
-        },
-        shared: {
-          skills: $shared_skills,
-          agents: $shared_agents,
-          rules: $shared_rules
-        }
-      }'
+  # Route large JSON vars through temp files to avoid ARG_MAX (macOS ~256KB).
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '%s' "${claude_md:-null}"          > "$tmpdir/claude_md.json"
+  printf '%s' "${rules:-null}"              > "$tmpdir/rules.json"
+  printf '%s' "${skills:-null}"             > "$tmpdir/skills.json"
+  printf '%s' "${agents:-null}"             > "$tmpdir/agents.json"
+  printf '%s' "${output_styles:-null}"      > "$tmpdir/output_styles.json"
+  printf '%s' "${auto_memory:-null}"        > "$tmpdir/auto_memory.json"
+  printf '%s' "${agent_memory:-null}"       > "$tmpdir/agent_memory.json"
+  printf '%s' "${settings:-null}"           > "$tmpdir/settings.json"
+  printf '%s' "${keybindings:-null}"        > "$tmpdir/keybindings.json"
+  printf '%s' "${mcp_servers:-null}"        > "$tmpdir/mcp_servers.json"
+  printf '%s' "${shared_skills:-null}"      > "$tmpdir/shared_skills.json"
+  printf '%s' "${shared_agents:-null}"      > "$tmpdir/shared_agents.json"
+  printf '%s' "${shared_rules:-null}"       > "$tmpdir/shared_rules.json"
+
+  jq -n \
+    --arg schema_ver "1.0.0" \
+    --arg ts "$timestamp" \
+    --arg mid "$machine_id" \
+    --arg mn "$machine_name" \
+    --arg os "$os_type" \
+    --slurpfile claude_md     "$tmpdir/claude_md.json" \
+    --slurpfile rules         "$tmpdir/rules.json" \
+    --slurpfile skills        "$tmpdir/skills.json" \
+    --slurpfile agents        "$tmpdir/agents.json" \
+    --slurpfile output_styles "$tmpdir/output_styles.json" \
+    --slurpfile auto_memory   "$tmpdir/auto_memory.json" \
+    --slurpfile agent_memory  "$tmpdir/agent_memory.json" \
+    --slurpfile settings      "$tmpdir/settings.json" \
+    --arg settings_hash "${settings_hash}" \
+    --slurpfile keybindings   "$tmpdir/keybindings.json" \
+    --arg keybindings_hash "${keybindings_hash}" \
+    --slurpfile mcp_servers   "$tmpdir/mcp_servers.json" \
+    --slurpfile shared_skills "$tmpdir/shared_skills.json" \
+    --slurpfile shared_agents "$tmpdir/shared_agents.json" \
+    --slurpfile shared_rules  "$tmpdir/shared_rules.json" \
+    '{
+      schema_version: $schema_ver,
+      exported_at: $ts,
+      machine: { id: $mid, name: $mn, os: $os },
+      declarative: {
+        claude_md: $claude_md[0],
+        rules: $rules[0]
+      },
+      procedural: {
+        skills: $skills[0],
+        agents: $agents[0],
+        output_styles: $output_styles[0]
+      },
+      experiential: {
+        auto_memory: $auto_memory[0],
+        agent_memory: $agent_memory[0]
+      },
+      environmental: {
+        settings: { content: $settings[0], hash: ("sha256:" + $settings_hash) },
+        keybindings: { content: $keybindings[0], hash: ("sha256:" + $keybindings_hash) },
+        mcp_servers: $mcp_servers[0]
+      },
+      shared: {
+        skills: $shared_skills[0],
+        agents: $shared_agents[0],
+        rules: $shared_rules[0]
+      }
+    }'
+  rm -rf "$tmpdir"
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────────
