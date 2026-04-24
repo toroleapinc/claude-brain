@@ -565,10 +565,16 @@ list_backups() {
 # Hyphens in names are doubled: my-project → my--project
 # Leading slash becomes leading hyphen
 decode_project_path() {
-  local encoded="$1"
-  # First restore leading slash, then un-double hyphens temporarily,
-  # then convert remaining single hyphens to slashes, then restore hyphens
-  echo "$encoded" | sed 's/^-/\//' | sed 's/--/\x00/g' | sed 's/-/\//g' | sed 's/\x00/-/g'
+  # Bash parameter expansion — portable across BSD sed (macOS) and GNU sed.
+  # The prior `sed 's/\x00/.../'` form silently returned empty string on BSD sed,
+  # collapsing every project_name key to "" and destroying multi-project memory
+  # exports. No subprocess spawned → also faster.
+  local s="$1"
+  [[ "$s" == -* ]] && s="/${s:1}"          # leading - → /
+  s="${s//--/__DD_SENTINEL__}"              # protect doubled dashes
+  s="${s//-//}"                             # remaining dashes → slashes
+  s="${s//__DD_SENTINEL__/-}"               # restore original dashes
+  echo "$s"
 }
 
 encode_project_path() {
