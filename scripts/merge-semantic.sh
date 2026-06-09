@@ -207,7 +207,7 @@ fi
 # Update memory entries
 if [ "$(echo "$merged_memory" | jq 'length')" -gt 0 ]; then
   tmp=$(brain_mktemp)
-  echo "$merged_memory" | jq -r 'keys[]' | while read -r project; do
+  echo "$merged_memory" | jq_lines 'keys[]' | while read -r project; do
     content=$(echo "$merged_memory" | jq -r --arg p "$project" '.[$p]')
     jq --arg p "$project" --arg c "$content" \
       '.experiential.auto_memory[$p]["MEMORY.md"].content = $c | .experiential.auto_memory[$p]["MEMORY.md"].hash = "merged"' \

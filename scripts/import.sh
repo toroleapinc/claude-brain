@@ -52,11 +52,36 @@ import_dir_entries() {
     return 0
   fi
 
-  # Resolve base_dir to absolute path for traversal check (pipe through stdin to avoid injection)
-  local resolved_base
-  resolved_base=$(echo "$base_dir" | python3 -c "import os,sys; print(os.path.realpath(sys.stdin.read().strip()))" 2>/dev/null || realpath "$base_dir" 2>/dev/null || echo "$base_dir")
+  # Resolve base_dir to absolute path for traversal check.
+  # Path-resolver preference and rationale:
+  #   1. GNU `realpath -m` — Git Bash and Linux ship it; produces forward-slash
+  #      output and supports paths whose tail doesn't yet exist (the first-time
+  #      import case).
+  #   2. `grealpath -m` — Homebrew coreutils on macOS installs GNU realpath under
+  #      this name; BSD `realpath` on stock macOS lacks `-m`, so we don't try it.
+  #   3. `python3 os.path.realpath` — last resort. Handles stock-macOS paths
+  #      fine but mangles MSYS-style /c/Users/... and /tmp/... on Windows MinGW
+  #      (returns C:\c\Users\...), which is what motivated the realpath-first
+  #      order in the first place.
+  # If all three fail we FAIL CLOSED: treat as unresolvable and refuse to write,
+  # rather than fall back to the raw "${base_dir}/${key}" string. The grep guard
+  # below already rejects literal `..` components, but resolver failure could
+  # still allow `..` in unusual encodings to sneak past the prefix check.
+  _resolve_path() {
+    local p="$1"
+    realpath -m "$p" 2>/dev/null \
+      || grealpath -m "$p" 2>/dev/null \
+      || echo "$p" | python3 -c "import os,sys; print(os.path.realpath(sys.stdin.read().strip()))" 2>/dev/null
+  }
 
-    echo "$json_entries" | jq -r 'keys[]' | while read -r key; do
+  local resolved_base
+  resolved_base=$(_resolve_path "$base_dir")
+  if [ -z "$resolved_base" ]; then
+    log_warn "BLOCKED: could not resolve base directory '$base_dir' (install GNU coreutils or python3)"
+    return 0
+  fi
+
+    echo "$json_entries" | jq_lines 'keys[]' | while read -r key; do
       # Pure-bash path traversal guard: reject keys containing '..' components
       if echo "$key" | grep -qE '(^|/)\.\.(/|$)'; then
         log_warn "BLOCKED path traversal: $key"
@@ -65,7 +90,11 @@ import_dir_entries() {
 
       # PATH TRAVERSAL CHECK: ensure key doesn't escape base_dir
       local resolved_target
-      resolved_target=$(echo "$resolved_base/$key" | python3 -c "import os,sys; print(os.path.realpath(sys.stdin.read().strip()))" 2>/dev/null || realpath "${resolved_base}/${key}" 2>/dev/null || echo "${resolved_base}/${key}")
+      resolved_target=$(_resolve_path "${resolved_base}/${key}")
+      if [ -z "$resolved_target" ]; then
+        log_warn "BLOCKED: could not resolve target path for '$key'"
+        continue
+      fi
       if [[ "$resolved_target" != "${resolved_base}/"* ]]; then
         log_warn "BLOCKED path traversal attempt: ${key} (would write outside ${base_dir})"
         continue
@@ -88,7 +117,7 @@ validate_imports() {
 
 
   # Check for new/changed skills
-  echo "$brain" | jq -r '.procedural.skills // {} | keys[]' 2>/dev/null | while read -r skill_path; do
+  echo "$brain" | jq_lines '.procedural.skills // {} | keys[]' 2>/dev/null | while read -r skill_path; do
     local target="${CLAUDE_DIR}/skills/${skill_path}"
     if [ ! -f "$target" ]; then
       log_warn "NEW skill will be imported: ${skill_path}"
@@ -105,7 +134,7 @@ validate_imports() {
   done
 
   # Check for new/changed agents
-  echo "$brain" | jq -r '.procedural.agents // {} | keys[]' 2>/dev/null | while read -r agent_path; do
+  echo "$brain" | jq_lines '.procedural.agents // {} | keys[]' 2>/dev/null | while read -r agent_path; do
     local target="${CLAUDE_DIR}/agents/${agent_path}"
     if [ ! -f "$target" ]; then
       log_warn "NEW agent will be imported: ${agent_path}"
@@ -122,7 +151,7 @@ validate_imports() {
   done
 
   # Check for new/changed rules
-  echo "$brain" | jq -r '.declarative.rules // {} | keys[]' 2>/dev/null | while read -r rule_path; do
+  echo "$brain" | jq_lines '.declarative.rules // {} | keys[]' 2>/dev/null | while read -r rule_path; do
     local target="${CLAUDE_DIR}/rules/${rule_path}"
     if [ ! -f "$target" ]; then
       log_warn "NEW rule will be imported: ${rule_path}"
@@ -184,7 +213,7 @@ import_brain() {
     import_dir_entries "${CLAUDE_DIR}/output-styles" "$output_styles"
 
   # Experiential: auto memory
-    echo "$brain" | jq -r '.experiential.auto_memory // {} | keys[]' 2>/dev/null | while read -r project; do
+    echo "$brain" | jq_lines '.experiential.auto_memory // {} | keys[]' 2>/dev/null | while read -r project; do
       local entries
       entries=$(echo "$brain" | jq --arg p "$project" '.experiential.auto_memory[$p] // {}')
       # Find matching project dir
@@ -205,7 +234,7 @@ import_brain() {
     done
 
   # Experiential: agent memory
-    echo "$brain" | jq -r '.experiential.agent_memory // {} | keys[]' 2>/dev/null | while read -r agent; do
+    echo "$brain" | jq_lines '.experiential.agent_memory // {} | keys[]' 2>/dev/null | while read -r agent; do
       # Sanitize agent name: block path traversal
       if echo "$agent" | grep -qE '(\.\.|/)'; then
         log_warn "BLOCKED suspicious agent name: ${agent}"

@@ -87,6 +87,17 @@ json_query() {
   jq -r "$filter"
 }
 
+# Run `jq -r <filter>` and strip any trailing CR.
+# Why: the Windows build of jq emits CRLF line terminators. `read -r` strips
+# the trailing \n but leaves the \r, so `$key` becomes "linting.md\r" and
+# subsequent `jq -r --arg k "$key" '.[$k].content'` lookups return empty.
+# No-op on Linux/macOS (input has no CR to strip).
+# Usage: echo "$json" | jq_lines '.foo // {} | keys[]' | while read -r x; do ...
+jq_lines() {
+  local filter="$1"
+  jq -r "$filter" | tr -d '\r'
+}
+
 json_build() {
   # Build JSON from arguments using jq
   # Usage: json_build --arg key value --arg key2 value2 'template'
