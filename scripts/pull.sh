@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 # pull.sh — Pull latest from remote, merge, and apply locally
 set -euo pipefail
+
+# Fork-bomb hard-stop: refuse to run if already nested inside an active sync.
+# The headless `claude -p` calls in merge-semantic.sh/evolve.sh re-trigger the
+# brain-sync SessionStart hook in the child process; without this guard that
+# hook starts another pull.sh, which spawns another claude -p, ad infinitum.
+# pull.sh/push.sh export BRAIN_SYNC_ACTIVE; the claude -p child inherits it and
+# its SessionStart hook (and this guard) no-op instead of recursing.
+if [ -n "${BRAIN_SYNC_ACTIVE:-}" ]; then
+  echo "[claude-brain] pull: BRAIN_SYNC_ACTIVE set — refusing recursive invocation." >&2
+  exit 0
+fi
+export BRAIN_SYNC_ACTIVE=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
@@ -101,6 +114,22 @@ else
       "${BRAIN_REPO}/consolidated/brain.json.merging"
   done
 
+  # Hand merge-semantic.sh a unique, PID-keyed marker file to publish its run-log
+  # path back to us. Keying it to this pull's PID (and cleaning it up on EXIT)
+  # prevents a stale marker from a standalone merge-semantic.sh run — or an
+  # aborted earlier pull — from being picked up and attached to an unrelated
+  # merge-log entry below. merge-semantic.sh only writes the marker when this
+  # env var is set, so invoking it directly never leaves one behind.
+  #
+  # trap on EXIT (not RETURN): this is script scope, and RETURN only fires on
+  # function/sourced-script return — at top level it never runs, so the marker
+  # would leak if the script aborted under `set -e` (e.g. import.sh failing)
+  # between marker creation and the explicit cleanup further down.
+  export BRAIN_RUN_LOG_MARKER="${BRAIN_RUNS_DIR}/.run-log.$$"
+  mkdir -p "${BRAIN_RUNS_DIR}"
+  rm -f "$BRAIN_RUN_LOG_MARKER"
+  trap 'rm -f "$BRAIN_RUN_LOG_MARKER" 2>/dev/null || true' EXIT
+
   # Now run N-way semantic merge on all snapshots at once
   if "${SCRIPT_DIR}/merge-semantic.sh" \
     "${BRAIN_REPO}/consolidated/brain.json" \
@@ -165,8 +194,17 @@ fi
 # Log the merge
 new_consolidated_hash=$(file_hash "${BRAIN_REPO}/consolidated/brain.json")
 if [ "$local_consolidated_hash" != "$new_consolidated_hash" ]; then
-  append_merge_log "pull+merge" "Merged ${snapshot_count} machine snapshots"
+  # Attach the run log produced by merge-semantic.sh (if it ran) so /brain-log
+  # can surface stderr + response details on demand. Read from this pull's
+  # PID-keyed marker only — never a shared/stale one.
+  run_log_path=""
+  if [ -n "${BRAIN_RUN_LOG_MARKER:-}" ] && [ -f "$BRAIN_RUN_LOG_MARKER" ]; then
+    run_log_path=$(cat "$BRAIN_RUN_LOG_MARKER")
+    rm -f "$BRAIN_RUN_LOG_MARKER"
+  fi
+  append_merge_log "pull+merge" "Merged ${snapshot_count} machine snapshots" "$run_log_path"
   log_info "Brain synced: merged ${snapshot_count} machine(s)."
 else
+  rm -f "${BRAIN_RUN_LOG_MARKER:-}" 2>/dev/null || true
   log_info "Brain synced: no changes."
 fi
