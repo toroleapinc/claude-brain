@@ -161,9 +161,20 @@ build_snapshot() {
   fi
 
   # Environmental: settings (strip env vars — mcpServers live in ~/.claude.json, not here)
+  # SECURITY: top-level `.env` is the obvious case, but plugin configs nest their
+  # own env blocks (e.g. `.pluginConfig.<plugin>.env`) that commonly hold API
+  # tokens. Also strip Authorization headers anywhere in the tree. Use `walk` so
+  # we catch arbitrary depth/structure, current or future.
   local settings="null"
   if ! $MEMORY_ONLY && [ -f "${CLAUDE_DIR}/settings.json" ]; then
-    settings=$(jq 'del(.env)' "${CLAUDE_DIR}/settings.json")
+    settings=$(jq '
+      walk(
+        if type == "object" then
+          del(.env)
+          | (if has("headers") then .headers |= del(.Authorization) else . end)
+        else . end
+      )
+    ' "${CLAUDE_DIR}/settings.json")
   fi
 
   local settings_hash="null"
@@ -182,13 +193,17 @@ build_snapshot() {
   # Environmental: MCP servers (from ~/.claude.json, NOT settings.json)
   # Claude Code stores mcpServers in ~/.claude.json (CLAUDE_JSON),
   # while settings.json only contains MCP policy fields.
-  # SECURITY: Strip env fields from each server config (may contain API keys/tokens)
+  # SECURITY: strip both env (stdio/proc servers' API keys) AND the Authorization
+  # header (HTTP/SSE servers like Figma store their bearer token there).
   local mcp_servers="{}"
   if ! $MEMORY_ONLY && [ -f "${CLAUDE_JSON}" ]; then
     mcp_servers=$(jq '
       .mcpServers // {} |
       to_entries |
-      map(.value = (.value | del(.env))) |
+      map(.value = (.value
+        | del(.env)
+        | (if has("headers") then .headers |= del(.Authorization) else . end)
+      )) |
       from_entries
     ' "${CLAUDE_JSON}" 2>/dev/null || echo "{}")
     # Rewrite absolute home paths to ${HOME}

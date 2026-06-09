@@ -161,6 +161,9 @@ EOF
 EOF
 
   # Settings
+  # Includes a top-level env (existing test_export_no_secrets) AND a nested
+  # pluginConfig.<plugin>.env block holding a github-PAT-shaped token, to
+  # exercise the recursive scrub for nested secret containers.
   cat > "$CLAUDE_DIR/settings.json" <<'EOF'
 {
   "permissions": {
@@ -172,6 +175,13 @@ EOF
   },
   "env": {
     "SECRET_KEY": "should-not-be-exported"
+  },
+  "pluginConfig": {
+    "github@claude-plugins-official": {
+      "env": {
+        "GITHUB_TOKEN": "ghp_FAKE_should_not_be_exported_FAKE_FAKE_FAKE"
+      }
+    }
   }
 }
 EOF
@@ -180,6 +190,31 @@ EOF
   cat > "$CLAUDE_DIR/keybindings.json" <<'EOF'
 [{"key": "ctrl+k", "command": "clear", "context": "terminal"}]
 EOF
+
+  # ~/.claude.json — Claude Code stores mcpServers here. Include both an env-bearing
+  # stdio server and an HTTP server with an Authorization Bearer header so the export
+  # scrubber gets exercised on both shapes.
+  cat > "$HOME/.claude.json" <<'EOF'
+{
+  "mcpServers": {
+    "stdio-server": {
+      "command": "/usr/bin/some-mcp",
+      "env": {
+        "API_KEY": "key-FAKE_stdio_should_not_be_exported_FAKE"
+      }
+    },
+    "figma": {
+      "type": "http",
+      "url": "https://mcp.figma.com/mcp",
+      "headers": {
+        "Authorization": "Bearer figd_FAKE_should_not_be_exported_FAKE_FAKE",
+        "X-Other-Header": "kept"
+      }
+    }
+  }
+}
+EOF
+  export CLAUDE_JSON="$HOME/.claude.json"
 
   # Init brain-repo as git repo
   (cd "$BRAIN_REPO" && git init -q -b main && git config user.email "test@test.com" && git config user.name "Test" && echo '{"entries":[]}' > meta/merge-log.json && git add -A && git commit -q -m "init")
@@ -245,9 +280,9 @@ test_export_no_secrets() {
   local content
   content=$(cat "$output")
 
-  # Env vars should not appear
+  # Env vars should not appear (top-level settings.env)
   if echo "$content" | grep -q "should-not-be-exported"; then
-    fail "Env var SECRET_KEY leaked into snapshot"
+    fail "Secret marker 'should-not-be-exported' leaked into snapshot"
   else
     pass "Env vars excluded from snapshot"
   fi
@@ -259,6 +294,42 @@ test_export_no_secrets() {
     pass "settings.env stripped from snapshot"
   else
     fail "settings.env present in snapshot: $env_val"
+  fi
+
+  # settings.pluginConfig.<plugin>.env should also be stripped (nested env)
+  local nested_token
+  nested_token=$(jqr '.environmental.settings.content.pluginConfig["github@claude-plugins-official"].env.GITHUB_TOKEN' "$output" 2>/dev/null || echo "null")
+  if [ "$nested_token" = "null" ] || [ -z "$nested_token" ]; then
+    pass "Nested settings.pluginConfig.*.env stripped from snapshot"
+  else
+    fail "Nested env leaked into snapshot: $nested_token"
+  fi
+
+  # mcpServers.<server>.env should be stripped (existing protection)
+  local mcp_env
+  mcp_env=$(jqr '.environmental.mcp_servers["stdio-server"].env' "$output" 2>/dev/null || echo "null")
+  if [ "$mcp_env" = "null" ] || [ -z "$mcp_env" ]; then
+    pass "mcp_servers.*.env stripped from snapshot"
+  else
+    fail "mcp_servers.*.env leaked into snapshot: $mcp_env"
+  fi
+
+  # mcpServers.<server>.headers.Authorization should be stripped (NEW)
+  local mcp_auth
+  mcp_auth=$(jqr '.environmental.mcp_servers.figma.headers.Authorization' "$output" 2>/dev/null || echo "null")
+  if [ "$mcp_auth" = "null" ] || [ -z "$mcp_auth" ]; then
+    pass "mcp_servers.*.headers.Authorization stripped from snapshot"
+  else
+    fail "mcp_servers.*.headers.Authorization leaked into snapshot: $mcp_auth"
+  fi
+
+  # Non-Authorization headers should be preserved (regression guard)
+  local kept_header
+  kept_header=$(jqr '.environmental.mcp_servers.figma.headers["X-Other-Header"]' "$output" 2>/dev/null || echo "null")
+  if [ "$kept_header" = "kept" ]; then
+    pass "Non-Authorization MCP headers preserved"
+  else
+    fail "Non-Authorization MCP header lost (got '$kept_header')"
   fi
 }
 
