@@ -917,6 +917,164 @@ EOF
   pass "import continued past keybindings step ('Brain import complete' logged)"
 }
 
+test_sync_guard_blocks_recursion() {
+  section "Fork-bomb guard: sync scripts no-op when BRAIN_SYNC_ACTIVE is set"
+
+  # pull.sh and push.sh must exit immediately (exit 0, no work) when the guard
+  # env var is already set — this is what stops the claude -p child's
+  # SessionStart hook from firing a nested sync. We run them with the guard set
+  # and assert they emit the refusal message and never reach git/fetch work.
+  local out
+  out=$(BRAIN_SYNC_ACTIVE=1 bash "$PROJECT_DIR/scripts/pull.sh" --quiet 2>&1) || true
+  if echo "$out" | grep -q "BRAIN_SYNC_ACTIVE set — refusing recursive invocation"; then
+    pass "pull.sh refuses to run when BRAIN_SYNC_ACTIVE is set"
+  else
+    fail "pull.sh did not no-op under BRAIN_SYNC_ACTIVE (got: $out)"
+  fi
+
+  out=$(BRAIN_SYNC_ACTIVE=1 bash "$PROJECT_DIR/scripts/push.sh" --quiet 2>&1) || true
+  if echo "$out" | grep -q "BRAIN_SYNC_ACTIVE set — refusing recursive invocation"; then
+    pass "push.sh refuses to run when BRAIN_SYNC_ACTIVE is set"
+  else
+    fail "push.sh did not no-op under BRAIN_SYNC_ACTIVE (got: $out)"
+  fi
+
+  # The guard must check before doing any real work: neither script should have
+  # touched the brain repo (no new commits) while blocked.
+  local head_before head_after
+  head_before=$(cd "$BRAIN_REPO" && git rev-parse HEAD)
+  BRAIN_SYNC_ACTIVE=1 bash "$PROJECT_DIR/scripts/pull.sh" --quiet >/dev/null 2>&1 || true
+  BRAIN_SYNC_ACTIVE=1 bash "$PROJECT_DIR/scripts/push.sh" --quiet >/dev/null 2>&1 || true
+  head_after=$(cd "$BRAIN_REPO" && git rev-parse HEAD)
+  [ "$head_before" = "$head_after" ] \
+    && pass "blocked sync scripts performed no repo work" \
+    || fail "blocked sync scripts mutated the brain repo"
+}
+
+test_hooks_guard_pattern() {
+  section "Fork-bomb guard: hooks skip when BRAIN_SYNC_ACTIVE is set"
+
+  # The three sync hooks must each gate their command on an unset
+  # BRAIN_SYNC_ACTIVE so an inherited guard suppresses the hook entirely
+  # (defense-in-depth on top of the in-script guard).
+  local cmds
+  cmds=$(jqr '.hooks | to_entries[] | .value[].hooks[].command' "$PROJECT_DIR/hooks/hooks.json")
+  local total guarded
+  total=$(echo "$cmds" | grep -c 'brain-config.json')
+  guarded=$(echo "$cmds" | grep -c 'BRAIN_SYNC_ACTIVE')
+  if [ "$total" -eq "$guarded" ] && [ "$total" -ge 3 ]; then
+    pass "all $total sync hooks gate on BRAIN_SYNC_ACTIVE"
+  else
+    fail "only $guarded of $total sync hooks gate on BRAIN_SYNC_ACTIVE"
+  fi
+
+  # Verify the gate actually short-circuits: emulate the hook condition with the
+  # guard set and confirm the body is skipped.
+  local ran="no"
+  # shellcheck disable=SC2016
+  if [ -z "${BRAIN_SYNC_ACTIVE:-}" ]; then ran="yes"; fi
+  BRAIN_SYNC_ACTIVE=1
+  local ran2="no"
+  if [ -z "${BRAIN_SYNC_ACTIVE:-}" ]; then ran2="yes"; fi
+  unset BRAIN_SYNC_ACTIVE
+  [ "$ran" = "yes" ] && [ "$ran2" = "no" ] \
+    && pass "hook gate condition short-circuits when guard is set" \
+    || fail "hook gate condition did not short-circuit (unset=$ran, set=$ran2)"
+}
+
+test_evolve_sets_guard_before_claude() {
+  section "Fork-bomb guard: evolve.sh + merge-semantic.sh set guard at spawn site"
+
+  # evolve.sh is invoked directly by the brain-evolve skill, bypassing pull.sh,
+  # so it must export BRAIN_SYNC_ACTIVE itself right before claude -p. Verify the
+  # export appears textually before the claude -p invocation in both scripts.
+  for script in evolve.sh merge-semantic.sh; do
+    local f="$PROJECT_DIR/scripts/$script"
+    local export_line claude_line
+    export_line=$(grep -n '^export BRAIN_SYNC_ACTIVE=1' "$f" | tail -1 | cut -d: -f1)
+    # Match the actual invocation (RESULT=$(... claude -p ...)), not the prose
+    # mentions in comments. The real call assigns to RESULT and pipes/passes the
+    # prompt, so anchor on the `claude -p` that is part of a command, excluding
+    # comment lines.
+    claude_line=$(grep -nE '(\$\(claude -p|\| claude -p|claude -p -|claude -p ")' "$f" \
+      | grep -v '^[0-9]*:#' | grep -v '^[0-9]*: *#' | head -1 | cut -d: -f1)
+    if [ -n "$export_line" ] && [ -n "$claude_line" ] && [ "$export_line" -lt "$claude_line" ]; then
+      pass "$script exports guard before claude -p (line $export_line < $claude_line)"
+    else
+      fail "$script does not export guard before claude -p (export=$export_line, claude=$claude_line)"
+    fi
+  done
+}
+
+test_fallback_merge_is_idempotent() {
+  section "Idempotent fallback: repeated concatenation merge converges"
+
+  # Reproduces the in-the-wild bug: the pre-fix fallback appended an "Unmerged
+  # content" marker block on every run, so CLAUDE.md grew by one copy per sync.
+  # We run the fixed merge-semantic.sh fallback path twice, feeding round 2 the
+  # output of round 1, and assert the content does not grow.
+  #
+  # Force the fallback path deterministically by making `claude` unavailable to
+  # the script via PATH stubbing — but the script exits 0 ("claude CLI not
+  # found") in that case, so instead we stub a `claude` that always fails,
+  # which drives the `|| { ... fallback ... }` branch.
+  local mtdir="$TEST_DIR/idem"
+  mkdir -p "$mtdir/bin"
+  cat > "$mtdir/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "$mtdir/bin/claude"
+
+  # Two snapshots with distinct CLAUDE.md so the fallback appends one marker.
+  cat > "$mtdir/base.json" <<'EOF'
+{"schema_version":"1.0.0","machine":{"id":"a","name":"machine-a"},"declarative":{"claude_md":{"content":"# Base rules\n- alpha","hash":""}},"procedural":{},"experiential":{"auto_memory":{}},"environmental":{}}
+EOF
+  cat > "$mtdir/other.json" <<'EOF'
+{"schema_version":"1.0.0","machine":{"id":"b","name":"machine-b"},"declarative":{"claude_md":{"content":"# Other rules\n- beta","hash":""}},"procedural":{},"experiential":{"auto_memory":{}},"environmental":{}}
+EOF
+
+  # Round 1: base + other → out1 (should contain exactly one marker block)
+  PATH="$mtdir/bin:$PATH" bash "$PROJECT_DIR/scripts/merge-semantic.sh" \
+    "$mtdir/out1.json" "$mtdir/base.json" "$mtdir/other.json" >/dev/null 2>&1 || true
+
+  if [ ! -f "$mtdir/out1.json" ]; then
+    fail "fallback merge produced no output"
+    return
+  fi
+  local markers1
+  markers1=$(jqr '.declarative.claude_md.content' "$mtdir/out1.json" | grep -c 'Unmerged content from' || true)
+
+  # Round 2: feed out1 back in as the base, merge with the same other snapshot.
+  # The fixed strip_markers logic must drop the prior marker before re-appending,
+  # so the marker count stays at 1 (not 2) and content length does not balloon.
+  PATH="$mtdir/bin:$PATH" bash "$PROJECT_DIR/scripts/merge-semantic.sh" \
+    "$mtdir/out2.json" "$mtdir/out1.json" "$mtdir/other.json" >/dev/null 2>&1 || true
+
+  local markers2 len1 len2
+  markers2=$(jqr '.declarative.claude_md.content' "$mtdir/out2.json" | grep -c 'Unmerged content from' || true)
+  len1=$(jqr '.declarative.claude_md.content' "$mtdir/out1.json" | wc -c | tr -d ' ')
+  len2=$(jqr '.declarative.claude_md.content' "$mtdir/out2.json" | wc -c | tr -d ' ')
+
+  if [ "$markers1" = "1" ]; then
+    pass "first fallback appends exactly one marker block"
+  else
+    fail "first fallback produced $markers1 marker blocks (expected 1)"
+  fi
+
+  if [ "$markers2" = "1" ]; then
+    pass "repeated fallback stays at one marker block (idempotent)"
+  else
+    fail "repeated fallback accumulated $markers2 marker blocks (the bug)"
+  fi
+
+  if [ "$len2" -le "$len1" ]; then
+    pass "repeated fallback does not grow CLAUDE.md ($len2 ≤ $len1 bytes)"
+  else
+    fail "repeated fallback grew CLAUDE.md from $len1 to $len2 bytes (the bug)"
+  fi
+}
+
 # ── Run ────────────────────────────────────────────────────────────────────────
 echo -e "${CYAN}claude-brain integration tests${NC}"
 echo "================================"
@@ -945,6 +1103,10 @@ test_semantic_merge_fallback
 test_wsl_detection
 test_encryption_roundtrip
 test_keybindings_shape_mismatch
+test_sync_guard_blocks_recursion
+test_hooks_guard_pattern
+test_evolve_sets_guard_before_claude
+test_fallback_merge_is_idempotent
 
 echo ""
 echo "================================"
