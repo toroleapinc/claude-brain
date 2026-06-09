@@ -301,20 +301,45 @@ import_brain() {
     fi
 
   # Environmental: keybindings (union)
+  # Claude Code may write keybindings.json as either an array `[{key,command,…}]`
+  # or as an empty object `{}` (no bindings configured). The union-merge below
+  # uses `unique_by`, which requires both inputs to be arrays — otherwise jq
+  # aborts with "object ({}) and array ([]) cannot be sorted, as they are not
+  # both arrays" and `set -euo pipefail` kills the rest of import_brain.
+  # Detect the shape on both sides and skip / use-as-is in non-array cases.
     local new_keybindings
     new_keybindings=$(echo "$brain" | jq '.environmental.keybindings.content // null')
     if [ "$new_keybindings" != "null" ]; then
+      local remote_kb_type
+      remote_kb_type=$(echo "$new_keybindings" | jq -r 'type' 2>/dev/null || echo "null")
       if [ -f "${CLAUDE_DIR}/keybindings.json" ]; then
-        local tmp tmp_remote_kb
-        tmp=$(brain_mktemp)
-        tmp_remote_kb=$(brain_mktemp)
-        printf '%s\n' "$new_keybindings" > "$tmp_remote_kb"
-        # Union keybindings arrays (deduplicate by key+command)
-        jq -s '.[0] + .[1] | unique_by(.key, .command)' "${CLAUDE_DIR}/keybindings.json" "$tmp_remote_kb" > "$tmp"
-        mv "$tmp" "${CLAUDE_DIR}/keybindings.json"
-        log_info "Updated: keybindings.json (merged)"
+        local local_kb_type
+        local_kb_type=$(jq -r 'type' "${CLAUDE_DIR}/keybindings.json" 2>/dev/null || echo "null")
+        if [ "$local_kb_type" = "array" ] && [ "$remote_kb_type" = "array" ]; then
+          local tmp tmp_remote_kb
+          tmp=$(brain_mktemp)
+          tmp_remote_kb=$(brain_mktemp)
+          printf '%s\n' "$new_keybindings" > "$tmp_remote_kb"
+          # Union keybindings arrays (deduplicate by key+command)
+          jq -s '.[0] + .[1] | unique_by(.key, .command)' "${CLAUDE_DIR}/keybindings.json" "$tmp_remote_kb" > "$tmp"
+          mv "$tmp" "${CLAUDE_DIR}/keybindings.json"
+          log_info "Updated: keybindings.json (merged)"
+        elif [ "$remote_kb_type" = "array" ] && [ "$local_kb_type" != "array" ]; then
+          # Local is empty-object / unexpected shape; remote has real bindings — adopt remote.
+          local tmp
+          tmp=$(brain_mktemp)
+          printf '%s\n' "$new_keybindings" > "$tmp"
+          mv "$tmp" "${CLAUDE_DIR}/keybindings.json"
+          log_info "Updated: keybindings.json (replaced — local was $local_kb_type)"
+        else
+          # Either remote is empty/non-array, or both are non-arrays. Nothing to merge.
+          log_info "Skipped keybindings merge (local=$local_kb_type, remote=$remote_kb_type)"
+        fi
       else
-        echo "$new_keybindings" > "${CLAUDE_DIR}/keybindings.json"
+        local tmp
+        tmp=$(brain_mktemp)
+        printf '%s\n' "$new_keybindings" > "$tmp"
+        mv "$tmp" "${CLAUDE_DIR}/keybindings.json"
         log_info "Created: keybindings.json"
       fi
     fi

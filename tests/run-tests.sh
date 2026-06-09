@@ -864,6 +864,59 @@ test_register_machine_preserves_timestamps() {
     || fail "last_push should be null on fresh registration (got '$actual_push')"
 }
 
+test_keybindings_shape_mismatch() {
+  section "Import: keybindings.json shape mismatch tolerated"
+
+  # Build a minimal brain whose env.keybindings.content is an empty object {}.
+  # Claude Code writes this when no keybindings are configured. The pre-fix
+  # union-merge used `jq unique_by` which requires arrays — it would crash with
+  # "object ({}) and array ([]) cannot be sorted", and because import.sh runs
+  # under `set -euo pipefail` the crash kills the rest of import_brain (e.g.
+  # the shared-namespace import that follows).
+  cat > "$TEST_DIR/kb-brain.json" <<'EOF'
+{
+  "schema_version": "1.0.0",
+  "machine": {"id":"t","name":"t","os":"linux"},
+  "declarative": {"claude_md": null, "rules": {}},
+  "procedural": {"skills": {}, "agents": {}, "output_styles": {}},
+  "experiential": {"auto_memory": {}, "agent_memory": {}},
+  "environmental": {
+    "settings": {"content": null, "hash": ""},
+    "keybindings": {"content": {}, "hash": ""},
+    "mcp_servers": {}
+  },
+  "shared": {
+    "skills": {"shared-sentinel.md": {"content": "# sentinel", "hash": "sha256:1"}},
+    "agents": {}, "rules": {}
+  }
+}
+EOF
+
+  # Force local keybindings.json to also be {} (the bug's worst case)
+  echo '{}' > "$CLAUDE_DIR/keybindings.json"
+
+  local output
+  output=$(bash "$PROJECT_DIR/scripts/import.sh" "$TEST_DIR/kb-brain.json" --no-backup 2>&1) || true
+
+  # When the bug fires, both assertions below would fail (crash detected AND
+  # `Brain import complete.` missing). Return on the first failure so the test
+  # reports one clear root cause per run instead of two correlated failures.
+  if echo "$output" | grep -qi "object.*and array.*cannot be sorted"; then
+    fail "keybindings merge still crashes on object shape"
+    return
+  fi
+  pass "keybindings merge handled object shape without crashing"
+
+  # The keybindings step is followed by the shared-namespace import and a final
+  # "Brain import complete." log line. If the crash propagated through `set -e`,
+  # that line never prints. Assert we made it past keybindings.
+  if ! echo "$output" | grep -q "Brain import complete"; then
+    fail "import aborted at keybindings step — 'Brain import complete' missing"
+    return
+  fi
+  pass "import continued past keybindings step ('Brain import complete' logged)"
+}
+
 # ── Run ────────────────────────────────────────────────────────────────────────
 echo -e "${CYAN}claude-brain integration tests${NC}"
 echo "================================"
@@ -891,6 +944,7 @@ test_export_scans_all_file_types
 test_semantic_merge_fallback
 test_wsl_detection
 test_encryption_roundtrip
+test_keybindings_shape_mismatch
 
 echo ""
 echo "================================"
