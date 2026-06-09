@@ -328,13 +328,16 @@ run_log_init() {
   mkdir -p "$dir"
   local ts
   ts=$(date -u +"%Y%m%dT%H%M%SZ")
-  RUN_LOG_PATH="${dir}/${ts}-${action}.log"
-  # Create with owner-only perms before writing: the payload includes merged
-  # brain content and raw claude stderr, which is sensitive at rest. Matches
-  # brain_mktemp's chmod 600. Create empty first so the chmod closes the window
-  # before any content lands.
-  : > "$RUN_LOG_PATH"
-  chmod 600 "$RUN_LOG_PATH"
+  # Append PID for uniqueness: the timestamp is only second-resolution, so two
+  # runs of the same action started within the same second would otherwise
+  # collide — overwriting one run's diagnostics and letting two merge-log
+  # entries point at the same file.
+  RUN_LOG_PATH="${dir}/${ts}-${action}.$$.log"
+  # Create atomically owner-only: the payload includes merged brain content and
+  # raw claude stderr, sensitive at rest. A umask scoped to the create avoids
+  # the create-then-chmod window where the file would briefly exist with the
+  # default (often group/world-readable) umask-derived mode.
+  ( umask 077 && : > "$RUN_LOG_PATH" )
   {
     echo "# claude-brain-sync run log"
     echo "action: ${action}"

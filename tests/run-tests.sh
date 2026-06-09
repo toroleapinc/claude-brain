@@ -957,8 +957,13 @@ test_hooks_guard_pattern() {
   # The three sync hooks must each gate their command on an unset
   # BRAIN_SYNC_ACTIVE so an inherited guard suppresses the hook entirely
   # (defense-in-depth on top of the in-script guard).
+  # Use jq directly: this filter is beyond the dot-path-only jqr python fallback.
+  if ! command -v jq &>/dev/null; then
+    skip "jq not installed — hook-gate filter needs real jq"
+    return
+  fi
   local cmds
-  cmds=$(jqr '.hooks | to_entries[] | .value[].hooks[].command' "$PROJECT_DIR/hooks/hooks.json")
+  cmds=$(jq -r '.hooks | to_entries[] | .value[].hooks[].command' "$PROJECT_DIR/hooks/hooks.json")
   local total guarded
   total=$(echo "$cmds" | grep -c 'brain-config.json')
   guarded=$(echo "$cmds" | grep -c 'BRAIN_SYNC_ACTIVE')
