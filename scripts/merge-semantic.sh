@@ -159,10 +159,33 @@ SCHEMA='{
 # ── Call claude -p ─────────────────────────────────────────────────────────────
 log_info "Running semantic merge via claude..."
 
+# Per-run log: replaces the silent stderr discard with a structured record
+# under ${BRAIN_RUNS_DIR}. run_log_init must NOT be captured via $(...) —
+# that would isolate RUN_LOG_PATH in a subshell.
+run_log_init "merge"
+RUN_LOG="$RUN_LOG_PATH"
+run_log_field "model" "sonnet"
+run_log_field "max_turns" "10"
+run_log_field "max_budget_usd" "$MAX_BUDGET"
+run_log_field "snapshot_count" "${#SNAPSHOTS[@]}"
+run_log_field "prompt_bytes" "$(wc -c < "$PROMPT_FILE" | tr -d ' ')"
+
+# Publish our run-log path so a calling pull.sh can attach it to the merge-log
+# entry. We only write when pull.sh handed us a PID-keyed marker via
+# BRAIN_RUN_LOG_MARKER; a standalone invocation sets nothing, so it can never
+# leave a stale marker for a later pull to misattribute. The marker lives
+# outside the synced repo (machine-local diagnostics).
+if [ -n "${BRAIN_RUN_LOG_MARKER:-}" ]; then
+  echo "$RUN_LOG" > "$BRAIN_RUN_LOG_MARKER"
+fi
+
 # Guard at the spawn site (see header note): keep BRAIN_SYNC_ACTIVE in the env
 # so the claude -p child inherits it and its SessionStart hook no-ops.
 # --no-session-persistence keeps this headless one-shot out of the session list.
 export BRAIN_SYNC_ACTIVE=1
+STDERR_FILE=$(brain_mktemp)
+start_epoch=$(date +%s)
+EXIT_CODE=0
 RESULT=$(cat "$PROMPT_FILE" | claude -p - \
   --no-session-persistence \
   --output-format json \
@@ -170,8 +193,15 @@ RESULT=$(cat "$PROMPT_FILE" | claude -p - \
   --model sonnet \
   --max-turns 10 \
   --max-budget-usd "$MAX_BUDGET" \
-  2>/dev/null) || {
-  log_warn "claude -p failed. Falling back to concatenation merge."
+  2>"$STDERR_FILE") || EXIT_CODE=$?
+
+run_log_field "duration_seconds" "$(( $(date +%s) - start_epoch ))"
+run_log_field "exit_code" "$EXIT_CODE"
+run_log_file   "stderr" "$STDERR_FILE"
+run_log_blob   "response_json" "$RESULT"
+
+if [ "$EXIT_CODE" -ne 0 ]; then
+  log_warn "claude -p failed (exit $EXIT_CODE). See $RUN_LOG. Falling back to concatenation merge."
   # Fallback: use first snapshot as base, append others with markers.
   # Idempotency: strip any pre-existing "Unmerged content" sections from BOTH
   # the base and each incoming snapshot before comparison. Without this, every
@@ -207,7 +237,7 @@ ${claude_md_clean}"
   jq --arg content "$fallback_claude_md" \
     '.declarative.claude_md.content = $content' "$OUTPUT" > "$tmp" && mv "$tmp" "$OUTPUT"
   exit 0
-}
+fi
 
 # ── Parse result and update brain ──────────────────────────────────────────────
 merged_claude_md=$(echo "$RESULT" | jq -r '.structured_output.merged_claude_md // empty')
@@ -269,5 +299,12 @@ dedup_count=$(echo "$deduped" | jq 'length')
 if [ "$dedup_count" -gt 0 ]; then
   log_info "${dedup_count} duplicate entries removed."
 fi
+
+run_log_section "summary"
+{
+  echo "conflicts: $conflict_count"
+  echo "deduped: $dedup_count"
+  echo "result: success"
+} >> "$RUN_LOG_PATH"
 
 log_info "Semantic merge complete."

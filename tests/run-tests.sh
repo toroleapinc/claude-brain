@@ -1075,6 +1075,118 @@ EOF
   fi
 }
 
+test_run_log_perms_and_content() {
+  section "Run logs: created 0600 and capture fields/sections"
+
+  # run_log_init must create the log owner-only (0600): the payload includes
+  # merged brain content + raw claude stderr, sensitive at rest. Drive the
+  # helpers directly in a subshell that sources common.sh.
+  local rundir="$TEST_DIR/runs"
+  local out
+  out=$(
+    export BRAIN_RUNS_DIR="$rundir"
+    source "$PROJECT_DIR/scripts/common.sh"
+    run_log_init "unittest"
+    run_log_field "model" "sonnet"
+    printf "boom on line 1\n" > "$TEST_DIR/stderr.txt"
+    run_log_file "stderr" "$TEST_DIR/stderr.txt"
+    run_log_blob "response_json" '{"ok":true}'
+    echo "$RUN_LOG_PATH"
+  )
+  local logfile="$out"
+
+  if [ -f "$logfile" ]; then
+    pass "run_log_init created a log file"
+  else
+    fail "run_log_init did not create a log file"
+    return
+  fi
+
+  # Permission check (portable stat: BSD -f%Lp, GNU -c%a)
+  local mode
+  mode=$(stat -f '%Lp' "$logfile" 2>/dev/null || stat -c '%a' "$logfile" 2>/dev/null)
+  if [ "$mode" = "600" ]; then
+    pass "run log is mode 0600 (owner-only)"
+  else
+    fail "run log mode is $mode (expected 600) — sensitive content world/group-readable"
+  fi
+
+  grep -q "^model: sonnet" "$logfile" \
+    && pass "run_log_field wrote the model field" \
+    || fail "run_log_field did not write the model field"
+  grep -q "boom on line 1" "$logfile" \
+    && pass "run_log_file captured stderr content" \
+    || fail "run_log_file did not capture stderr content"
+  grep -q '{"ok":true}' "$logfile" \
+    && pass "run_log_blob captured the response payload" \
+    || fail "run_log_blob did not capture the response payload"
+}
+
+test_pull_marker_trap_cleans_up_on_abort() {
+  section "Run logs: PID-keyed marker is removed even when pull aborts"
+
+  # The marker cleanup uses `trap … EXIT` (not RETURN, which never fires at
+  # script scope). Verify EXIT is used and that an aborting script still cleans
+  # up the marker. We emulate the marker+trap pattern in a child script that
+  # aborts under `set -e`, and assert the marker file is gone afterward.
+  if grep -q "trap .*BRAIN_RUN_LOG_MARKER.* EXIT" "$PROJECT_DIR/scripts/pull.sh"; then
+    pass "pull.sh uses trap … EXIT for marker cleanup"
+  else
+    fail "pull.sh does not use trap … EXIT (RETURN never fires at script scope)"
+  fi
+  if grep -q "trap .*BRAIN_RUN_LOG_MARKER.* RETURN" "$PROJECT_DIR/scripts/pull.sh"; then
+    fail "pull.sh still uses the dead trap … RETURN"
+  else
+    pass "pull.sh no longer uses the dead trap … RETURN"
+  fi
+
+  local marker="$TEST_DIR/.run-log.test"
+  cat > "$TEST_DIR/abort.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+MARKER="$marker"
+: > "\$MARKER"
+trap 'rm -f "\$MARKER" 2>/dev/null || true' EXIT
+false   # abort under set -e, between marker creation and any explicit cleanup
+echo "unreachable"
+EOF
+  bash "$TEST_DIR/abort.sh" >/dev/null 2>&1 || true
+  [ ! -f "$marker" ] \
+    && pass "marker is cleaned up on abnormal EXIT" \
+    || fail "marker leaked after abort (RETURN-style trap would do this)"
+}
+
+test_merge_log_records_run_log() {
+  section "Run logs: append_merge_log persists run_log basename only"
+
+  # append_merge_log must store only the basename of the run-log path, so the
+  # synced merge-log.json never leaks a local username/filesystem layout.
+  local out
+  out=$(
+    source "$PROJECT_DIR/scripts/common.sh"
+    append_merge_log "merge" "test entry" "/Users/somebody/.claude/brain-runs/20260101T000000Z-merge.log"
+    echo done
+  )
+  local stored
+  stored=$(jqr '.entries[0].run_log' "$BRAIN_REPO/meta/merge-log.json")
+  if [ "$stored" = "20260101T000000Z-merge.log" ]; then
+    pass "merge-log stores run_log as bare basename (no path leak)"
+  else
+    fail "merge-log stored '$stored' (expected bare basename)"
+  fi
+
+  # An entry logged without a run_log must omit the field entirely.
+  (
+    source "$PROJECT_DIR/scripts/common.sh"
+    append_merge_log "push" "no log entry"
+  )
+  local has_field
+  has_field=$(jqr '.entries[0] | has("run_log")' "$BRAIN_REPO/meta/merge-log.json")
+  [ "$has_field" = "false" ] \
+    && pass "entries without a run log omit the run_log field" \
+    || fail "entry without a run log unexpectedly has run_log field"
+}
+
 # ── Run ────────────────────────────────────────────────────────────────────────
 echo -e "${CYAN}claude-brain integration tests${NC}"
 echo "================================"
@@ -1107,6 +1219,9 @@ test_sync_guard_blocks_recursion
 test_hooks_guard_pattern
 test_evolve_sets_guard_before_claude
 test_fallback_merge_is_idempotent
+test_run_log_perms_and_content
+test_pull_marker_trap_cleans_up_on_abort
+test_merge_log_records_run_log
 
 echo ""
 echo "================================"
