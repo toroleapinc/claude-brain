@@ -5,6 +5,16 @@ All notable changes to claude-brain will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`SessionStart`-hook fork bomb during sync.** The headless `claude -p` call inside `merge-semantic.sh`/`evolve.sh` re-ran the brain-sync `SessionStart` hook in the child process, which started another `pull.sh → merge-semantic.sh → claude -p` chain — spawning a new process every few seconds (30+ runaway processes within minutes). Fixed with a `BRAIN_SYNC_ACTIVE` env-var sentinel: `pull.sh`/`push.sh` export it and exit early if already set, `evolve.sh`/`merge-semantic.sh` export it defensively at their `claude -p` spawn site, and the `SessionStart`/`SessionEnd`/`PreCompact` hooks skip when it is set. The flag is inherited by the `claude -p` child, so its hook no-ops instead of recursing.
+- **OAuth auth broke during semantic merge.** An earlier fix used `--bare` on the `claude -p` call to stop the fork bomb, but `--bare` also disables keychain reads — so users authenticated via Claude.ai OAuth (rather than `ANTHROPIC_API_KEY`) saw every semantic merge fail with "Not logged in" and fall back to concatenation. `--bare` is replaced by the env-var guard above, restoring OAuth keychain access.
+- **Idempotent concatenation fallback.** When the semantic merge fell back to concatenation, it appended an "Unmerged content" marker block on every run without stripping pre-existing ones — so `CLAUDE.md` grew by one duplicate copy per sync (observed accumulating identical copies across repeated syncs in the wild). The fallback now strips prior marker sections from both base and incoming snapshots before re-appending, so repeated runs converge.
+
+### Changed
+- Headless `claude -p` merge/evolve calls now pass `--no-session-persistence` so these one-shot calls leave no entry in the Claude Code session picker.
+
 ## [0.2.0] - 2026-05-07
 
 ### Fixed

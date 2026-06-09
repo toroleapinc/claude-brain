@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # export.sh — Serialize local brain state to a JSON snapshot
 set -euo pipefail
+
+# Note: this script is intentionally callable while BRAIN_SYNC_ACTIVE is set —
+# it is invoked as a child of push.sh, which has already set the flag. Fork-bomb
+# protection lives in the SessionStart/SessionEnd/PreCompact hooks (which suppress
+# the hook when the flag is inherited via env), not here.
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 

@@ -117,7 +117,14 @@ SCHEMA='{
 # ── Run analysis ───────────────────────────────────────────────────────────────
 log_info "Analyzing brain for evolution opportunities..."
 
+# Fork-bomb guard at the spawn site: evolve.sh is invoked directly by the
+# brain-evolve skill (bypassing pull.sh), so the guard may not be set yet.
+# Export it defensively right before claude -p so the child process inherits
+# it and its SessionStart hook no-ops instead of firing a nested pull.sh.
+# --no-session-persistence keeps this headless one-shot out of the session list.
+export BRAIN_SYNC_ACTIVE=1
 RESULT=$(claude -p "$PROMPT" \
+  --no-session-persistence \
   --output-format json \
   --json-schema "$SCHEMA" \
   --model sonnet \
