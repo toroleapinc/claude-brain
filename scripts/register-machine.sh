@@ -108,7 +108,7 @@ register_machine() {
             identity: $identity,
             recipients: $recipients
           }
-        }' > "$BRAIN_CONFIG"
+        }' > "${BRAIN_CONFIG}.tmp.$$" && mv -f "${BRAIN_CONFIG}.tmp.$$" "$BRAIN_CONFIG"
     else
       jq -n \
         --arg ver "1.0.0" \
@@ -138,7 +138,7 @@ register_machine() {
           encryption: {
             enabled: false
           }
-        }' > "$BRAIN_CONFIG"
+        }' > "${BRAIN_CONFIG}.tmp.$$" && mv -f "${BRAIN_CONFIG}.tmp.$$" "$BRAIN_CONFIG"
     fi
 
   # Update machines.json in brain repo if it exists
