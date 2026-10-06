@@ -102,7 +102,10 @@ else
   done
 
   # Now run N-way semantic merge on all snapshots at once
-  if "${SCRIPT_DIR}/merge-semantic.sh" \
+  # BRAIN_MERGE_BASE: semantic merge must build on the structured union, not on
+  # snapshots[0] (which silently discarded every other machine's data).
+  if BRAIN_MERGE_BASE="${BRAIN_REPO}/consolidated/brain.json.merging" \
+    "${SCRIPT_DIR}/merge-semantic.sh" \
     "${BRAIN_REPO}/consolidated/brain.json" \
     "${snapshots[@]}"; then
     # Semantic merge succeeded — its output is brain.json; discard structured fallback

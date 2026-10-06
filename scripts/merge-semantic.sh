@@ -11,6 +11,14 @@ OUTPUT="$1"
 shift
 SNAPSHOTS=("$@")
 
+# Base to build the merged brain on. pull.sh passes the structured N-way union
+# here; without it we'd start from SNAPSHOTS[0] and drop every other machine's
+# skills/memory/settings.
+MERGE_BASE="${BRAIN_MERGE_BASE:-}"
+if [ -z "$MERGE_BASE" ] || [ ! -f "$MERGE_BASE" ]; then
+  MERGE_BASE="${SNAPSHOTS[0]:-}"
+fi
+
 CONFIDENCE_THRESHOLD=0.8
 MAX_BUDGET="0.50"
 
@@ -22,6 +30,7 @@ fi
 
 if ! command -v claude &>/dev/null; then
   log_warn "claude CLI not found. Skipping semantic merge."
+  [ -n "$MERGE_BASE" ] && cp "$MERGE_BASE" "$OUTPUT"
   exit 0
 fi
 
@@ -94,14 +103,14 @@ content_hash=$(echo "$all_content_hash" | compute_hash)
 unique_hashes=()
 for snapshot_file in "${SNAPSHOTS[@]}"; do
   snapshot_hash=$(jq -r '.declarative.claude_md.content // ""' "$snapshot_file" | compute_hash)
-  if [[ ! " ${unique_hashes[*]} " =~ " ${snapshot_hash} " ]]; then
+  if [[ ! " ${unique_hashes[*]:-} " =~ " ${snapshot_hash} " ]]; then
     unique_hashes+=("$snapshot_hash")
   fi
 done
 
 if [ ${#unique_hashes[@]} -eq 1 ]; then
   log_info "No semantic differences to merge - all content identical."
-  cp "${SNAPSHOTS[0]}" "$OUTPUT"
+  cp "$MERGE_BASE" "$OUTPUT"
   exit 0
 fi
 
@@ -161,11 +170,10 @@ RESULT=$(cat "$PROMPT_FILE" | claude -p - \
   2>/dev/null) || {
   log_warn "claude -p failed. Falling back to concatenation merge."
   # Fallback: use first snapshot as base, append others with markers
-  base_snapshot="${SNAPSHOTS[0]}"
-  cp "$base_snapshot" "$OUTPUT"
+  cp "$MERGE_BASE" "$OUTPUT"
   
   # Collect unique CLAUDE.md content to append
-  base_claude_md=$(jq -r '.declarative.claude_md.content // ""' "$base_snapshot")
+  base_claude_md=$(jq -r '.declarative.claude_md.content // ""' "$MERGE_BASE")
   fallback_claude_md="$base_claude_md"
   
   for snapshot_file in "${SNAPSHOTS[@]:1}"; do
@@ -193,8 +201,8 @@ merged_memory=$(echo "$RESULT" | jq '.structured_output.merged_memory_entries //
 conflicts=$(echo "$RESULT" | jq '.structured_output.conflicts // []')
 deduped=$(echo "$RESULT" | jq '.structured_output.deduped // []')
 
-# Start with first snapshot as base, apply semantic merges
-cp "${SNAPSHOTS[0]}" "$OUTPUT"
+# Start from the structured union, apply semantic merges on top
+cp "$MERGE_BASE" "$OUTPUT"
 
 # Update CLAUDE.md
 if [ -n "$merged_claude_md" ]; then

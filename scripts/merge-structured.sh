@@ -15,6 +15,10 @@ if [ ! -f "$BASE" ] || [ ! -f "$OTHER" ]; then
 fi
 
 
+# Write to a temp file first: pull.sh passes the same path as BASE and OUTPUT,
+# and `> "$OUTPUT"` would truncate BASE before jq reads it.
+merged_tmp=$(brain_mktemp)
+
 # Create a comprehensive merge using jq
 jq -s '
 def deep_merge:
@@ -79,10 +83,26 @@ def deep_merge:
 ($other.environmental.mcp_servers // {}) as $other_mcp |
 ($base_mcp * $other_mcp) as $merged_mcp |
 
-# Merge experiential: auto_memory (union projects, within project keep base for semantic merge)
+# Merge experiential: auto_memory (union projects AND files within each project;
+# same filename → other wins). MEMORY.md indexes are unioned line-by-line so
+# entries added on either machine survive. Previously `add` replaced whole
+# projects, dropping every memory file the base machine had for that project.
 ($base.experiential.auto_memory // {}) as $base_mem |
 ($other.experiential.auto_memory // {}) as $other_mem |
-([$base_mem, $other_mem] | add // {}) as $merged_mem |
+(($base_mem * $other_mem)
+  | with_entries(
+      .key as $p
+      | ($base_mem[$p]["MEMORY.md"].content // null) as $bi
+      | ($other_mem[$p]["MEMORY.md"].content // null) as $oi
+      | if $bi != null and $oi != null and $bi != $oi then
+          .value["MEMORY.md"] = {
+            content: (reduce (($bi | split("\n")) + ($oi | split("\n")))[] as $l
+                        ([]; if ($l != "" and any(.[]; . == $l)) then . else . + [$l] end)
+                      | join("\n")),
+            hash: "merged"
+          }
+        else . end
+    )) as $merged_mem |
 
 # Merge experiential: agent_memory (union agents, keep base content for semantic merge)
 ($base.experiential.agent_memory // {}) as $base_amem |
@@ -110,6 +130,7 @@ $base * {
     mcp_servers: $merged_mcp
   }
 }
-' "$BASE" "$OTHER" > "$OUTPUT"
+' "$BASE" "$OTHER" > "$merged_tmp"
+mv "$merged_tmp" "$OUTPUT"
 
 log_info "Structured merge complete."

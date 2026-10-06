@@ -815,6 +815,69 @@ EOF
   fi
 }
 
+test_memory_survives_nway_merge() {
+  section "Pull: memory from every machine survives N-way merge"
+
+  # Regression: when all machines share the same CLAUDE.md, merge-semantic.sh
+  # used to copy SNAPSHOTS[0] over the structured union, so a machine with no
+  # memory wiped every other machine's memory from the consolidated brain.
+  local d="$TEST_DIR/nway-mem"
+  mkdir -p "$d"
+
+  cat > "$d/a.json" <<'JSON'
+{"schema_version":"1.0.0","machine":{"id":"aaa","name":"machine-a"},
+ "declarative":{"claude_md":{"content":"same","hash":"h"},"rules":{}},
+ "procedural":{"skills":{},"agents":{}},
+ "experiential":{"auto_memory":{}},
+ "environmental":{}}
+JSON
+  cat > "$d/b.json" <<'JSON'
+{"schema_version":"1.0.0","machine":{"id":"bbb","name":"machine-b"},
+ "declarative":{"claude_md":{"content":"same","hash":"h"},"rules":{}},
+ "procedural":{"skills":{},"agents":{}},
+ "experiential":{"auto_memory":{"proj":{
+   "MEMORY.md":{"content":"- [B note](b.md)","hash":"1"},
+   "b.md":{"content":"from b","hash":"2"}}}},
+ "environmental":{}}
+JSON
+  cat > "$d/c.json" <<'JSON'
+{"schema_version":"1.0.0","machine":{"id":"ccc","name":"machine-c"},
+ "declarative":{"claude_md":{"content":"same","hash":"h"},"rules":{}},
+ "procedural":{"skills":{},"agents":{}},
+ "experiential":{"auto_memory":{"proj":{
+   "MEMORY.md":{"content":"- [C note](c.md)","hash":"3"},
+   "c.md":{"content":"from c","hash":"4"}}}},
+ "environmental":{}}
+JSON
+
+  # Mirror pull.sh: structured N-way union, then semantic merge on top of it
+  cp "$d/a.json" "$d/merging.json"
+  bash "$PROJECT_DIR/scripts/merge-structured.sh" "$d/merging.json" "$d/b.json" "$d/merging.json" 2>/dev/null || true
+  bash "$PROJECT_DIR/scripts/merge-structured.sh" "$d/merging.json" "$d/c.json" "$d/merging.json" 2>/dev/null || true
+  BRAIN_MERGE_BASE="$d/merging.json" \
+    bash "$PROJECT_DIR/scripts/merge-semantic.sh" "$d/out.json" "$d/a.json" "$d/b.json" "$d/c.json" 2>/dev/null || true
+
+  if [ ! -f "$d/out.json" ]; then
+    fail "merge-semantic.sh produced no output"
+    return
+  fi
+
+  if [ "$(jq -r '.experiential.auto_memory.proj["b.md"].content // empty' "$d/out.json")" = "from b" ] &&
+     [ "$(jq -r '.experiential.auto_memory.proj["c.md"].content // empty' "$d/out.json")" = "from c" ]; then
+    pass "Memory files from both machines kept in the same project"
+  else
+    fail "Memory files lost in merge (got: $(jq -c '.experiential.auto_memory' "$d/out.json"))"
+  fi
+
+  local index
+  index=$(jq -r '.experiential.auto_memory.proj["MEMORY.md"].content // ""' "$d/out.json")
+  if echo "$index" | grep -q "B note" && echo "$index" | grep -q "C note"; then
+    pass "MEMORY.md index entries from both machines unioned"
+  else
+    fail "MEMORY.md index lost entries (got: $index)"
+  fi
+}
+
 test_register_machine_preserves_timestamps() {
   section "register-machine.sh preserves existing sync timestamps"
 
@@ -942,6 +1005,7 @@ test_path_traversal_blocked
 test_export_memory_only
 test_export_scans_all_file_types
 test_semantic_merge_fallback
+test_memory_survives_nway_merge
 test_wsl_detection
 test_encryption_roundtrip
 test_keybindings_shape_mismatch
